@@ -266,6 +266,7 @@ type System struct {
 	inputCfg            InputConfig
 	sessionSetups       map[int]SessionSetup // Controller Setup of each netplay or replay channel
 	inputs              InputAssignment
+	runSide             int32
 	loader              Loader
 	chars               [MaxPlayerNo][]*Char
 	charList            CharList
@@ -1118,6 +1119,9 @@ func (s *System) resetRemapInput() {
 		s.inputRemap[i] = i
 	}
 }
+
+// 0-based index of the side running the mode.
+func (s *System) runSideIndex() int { return int(s.runSide) }
 
 func (s *System) loaderReset() {
 	s.roundNo, s.wins, s.roundsExisted, s.decisiveRound = 1, [2]int32{}, [2]int32{}, [2]bool{}
