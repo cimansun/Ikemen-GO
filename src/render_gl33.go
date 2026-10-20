@@ -777,6 +777,7 @@ func (r *Renderer_GL33) Init() {
 	// Identity shader (no post-processing)
 	identShader, _ := r.newShaderProgram(identVertShader, identFragShader, "", "Identity Postprocess", true)
 	identShader.RegisterAttributes("VertCoord")
+	identShader.RegisterUniforms("OutputTransform")
 	//identShader.RegisterUniforms("Texture_GL33", "TextureSize", "CurrentTime") // None of these are used
 
 	// Configure postVAO for the identity shader's attribute location
@@ -799,7 +800,7 @@ func (r *Renderer_GL33) Init() {
 		gl.Disable(gl.MULTISAMPLE)
 	}
 
-	grabTex, _ := r.newTexture(sys.scrrect[2], sys.scrrect[3], 32, true)
+	grabTex, _ := r.newTexture(sys.renderTargetRect[2], sys.renderTargetRect[3], 32, true)
 	r.grabTexture = grabTex.(*Texture_GL33)
 	r.grabTexture.SetData(nil)
 
@@ -825,8 +826,8 @@ func (r *Renderer_GL33) Init() {
 			gl.TEXTURE_2D_MULTISAMPLE,
 			sys.msaa,
 			gl.RGBA,
-			sys.scrrect[2],
-			sys.scrrect[3],
+			sys.renderTargetRect[2],
+			sys.renderTargetRect[3],
 			true,
 		)
 	} else {
@@ -834,8 +835,8 @@ func (r *Renderer_GL33) Init() {
 			gl.TEXTURE_2D,
 			0,
 			gl.RGBA,
-			sys.scrrect[2],
-			sys.scrrect[3],
+			sys.renderTargetRect[2],
+			sys.renderTargetRect[3],
 			0,
 			gl.RGBA,
 			gl.UNSIGNED_BYTE,
@@ -861,8 +862,8 @@ func (r *Renderer_GL33) Init() {
 			gl.TEXTURE_2D,
 			0,
 			gl.RGBA8_SNORM,
-			sys.scrrect[2],
-			sys.scrrect[3],
+			sys.renderTargetRect[2],
+			sys.renderTargetRect[3],
 			0,
 			gl.RGBA,
 			gl.UNSIGNED_BYTE,
@@ -882,20 +883,20 @@ func (r *Renderer_GL33) Init() {
 
 	gl.BindRenderbuffer(gl.RENDERBUFFER, r.rbo_depth)
 	if sys.msaa > 0 {
-		//gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int(sys.scrrect[2]), int(sys.scrrect[3]))
-		gl.RenderbufferStorageMultisample(gl.RENDERBUFFER, sys.msaa, gl.DEPTH_COMPONENT16, sys.scrrect[2], sys.scrrect[3])
+		//gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int(sys.renderTargetRect[2]), int(sys.renderTargetRect[3]))
+		gl.RenderbufferStorageMultisample(gl.RENDERBUFFER, sys.msaa, gl.DEPTH_COMPONENT16, sys.renderTargetRect[2], sys.renderTargetRect[3])
 	} else {
-		gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, sys.scrrect[2], sys.scrrect[3])
+		gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, sys.renderTargetRect[2], sys.renderTargetRect[3])
 	}
 	gl.BindRenderbuffer(gl.RENDERBUFFER, 0)
 	if sys.msaa > 0 {
-		fboTex, _ := r.newTexture(sys.scrrect[2], sys.scrrect[3], 32, false)
+		fboTex, _ := r.newTexture(sys.renderTargetRect[2], sys.renderTargetRect[3], 32, false)
 		r.fbo_f_texture = fboTex.(*Texture_GL33)
 		r.fbo_f_texture.SetData(nil)
 	} else {
 		//r.rbo_depth = gl.CreateRenderbuffer()
 		//gl.BindRenderbuffer(gl.RENDERBUFFER, r.rbo_depth)
-		//gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int(sys.scrrect[2]), int(sys.scrrect[3]))
+		//gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, int(sys.renderTargetRect[2]), int(sys.renderTargetRect[3]))
 		//gl.BindRenderbuffer(gl.RENDERBUFFER, gl.NoRenderbuffer)
 	}
 
@@ -1383,7 +1384,9 @@ func (r *Renderer_GL33) IsShadowEnabled() bool {
 
 func (r *Renderer_GL33) BeginFrame(clearColor bool) {
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
-	gl.Viewport(0, 0, sys.scrrect[2], sys.scrrect[3])
+	viewport := sys.currentDrawViewport()
+	r.SetViewport(viewport[0], viewport[1], viewport[2], viewport[3])
+	r.DisableScissor()
 	if clearColor {
 		gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 	} else {
@@ -1396,7 +1399,7 @@ func (r *Renderer_GL33) EndFrame() {
 		return
 	}
 
-	x, y, width, height := int32(0), int32(0), int32(sys.scrrect[2]), int32(sys.scrrect[3])
+	x, y, width, height := int32(0), int32(0), int32(sys.renderTargetRect[2]), int32(sys.renderTargetRect[3])
 	time := sdl.GetPerformanceCounter() // consistent time across all shaders
 
 	if sys.msaa > 0 {
@@ -1465,10 +1468,19 @@ func (r *Renderer_GL33) EndFrame() {
 			// so we ask GL to scale it and output it
 			// to FB0, the default frame buffer that the user sees
 			x, y, width, height := sys.window.GetScaledViewportSize()
-			gl.Viewport(x, y, width, height)
+			drawableWidth, drawableHeight := sys.window.GetDrawablePixelSize()
+			gl.Viewport(0, 0, drawableWidth, drawableHeight)
+			if drawableWidth > 0 && drawableHeight > 0 {
+				dw, dh := float32(drawableWidth), float32(drawableHeight)
+				r.SetUniformFSub(postShader.uniforms["OutputTransform"], width/dw, height/dh,
+					(2*x+width)/dw-1, 1-(2*y+height)/dh)
+			}
 			gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 			// clear FB0 just to make sure
 			gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+			clip := sys.window.GetPresentationScissor()
+			gl.Enable(gl.SCISSOR_TEST)
+			gl.Scissor(clip[0], drawableHeight-clip[1]-clip[3], clip[2], clip[3])
 		}
 
 		// set post-processing parameters
@@ -1488,6 +1500,8 @@ func (r *Renderer_GL33) EndFrame() {
 		// construct the quad and draw it
 		gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
 	}
+	// Turn off the clipping used for the final on-screen pass.
+	gl.Disable(gl.SCISSOR_TEST)
 }
 
 func (r *Renderer_GL33) Await() {
@@ -1816,7 +1830,8 @@ func (r *Renderer_GL33) prepareModelPipeline(bufferIndex uint32, env *Environmen
 	r.bindVertexArray(r.modelVAO)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
 
-	gl.Viewport(0, 0, sys.scrrect[2], sys.scrrect[3])
+	viewport := sys.currentDrawViewport()
+	r.SetViewport(viewport[0], viewport[1], viewport[2], viewport[3])
 	r.SetDepthMask(true)
 	gl.Clear(gl.DEPTH_BUFFER_BIT)
 	//gl.Enable(gl.TEXTURE_2D) // Causes OpenGL error
@@ -2092,9 +2107,15 @@ func (r *Renderer_GL33) FinishScreenshot(data []uint8, width, height int) bool {
 	return true
 }
 
+func (r *Renderer_GL33) SetViewport(x, y, width, height int32) {
+	gl.Viewport(x, sys.renderTargetRect[3]-(y+height), width, height)
+}
+
 func (r *Renderer_GL33) EnableScissor(x, y, width, height int32) {
+	rect := sys.viewportScissor([4]int32{x, y, width, height})
+	x, y, width, height = rect[0], rect[1], rect[2], rect[3]
 	// Flip Y to OpenGL convention
-	realY := sys.scrrect[3] - (y + height)
+	realY := sys.renderTargetRect[3] - (y + height)
 
 	if !r.scissorEnabled {
 		gl.Enable(gl.SCISSOR_TEST)
@@ -2102,7 +2123,7 @@ func (r *Renderer_GL33) EnableScissor(x, y, width, height int32) {
 	}
 
 	// The rect survives DisableScissor, so only set it when it changes
-	rect := [4]int32{x, realY, width, height}
+	rect = [4]int32{x, realY, width, height}
 	if rect != r.scissorRect {
 		gl.Scissor(x, realY, width, height)
 		r.scissorRect = rect
@@ -2720,7 +2741,7 @@ func (r *Renderer_GL33) ResolveBackBuffer() Texture {
 		gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.fbo)
 		gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, r.grabFbo)
 
-		gl.BlitFramebuffer(0, 0, sys.scrrect[2], sys.scrrect[3], 0, 0, sys.scrrect[2], sys.scrrect[3], gl.COLOR_BUFFER_BIT, gl.NEAREST)
+		gl.BlitFramebuffer(0, 0, sys.renderTargetRect[2], sys.renderTargetRect[3], 0, 0, sys.renderTargetRect[2], sys.renderTargetRect[3], gl.COLOR_BUFFER_BIT, gl.NEAREST)
 
 		gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
 		return r.grabTexture
