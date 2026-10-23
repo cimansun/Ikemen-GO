@@ -1,0 +1,233 @@
+on:
+push:
+branches: [ develop, ci-test ]
+workflow_dispatch:
+inputs:
+tag:
+description: 'Version tag (e.g. v1.0.0-rc.1). Leave empty to build the selected branch; develop builds nightly.'
+type: string
+required: false
+default: ''
+draft:
+description: 'Set as a draft release.'
+type: boolean
+required: false
+default: false
+discussionCategory:
+description: 'When provided this will generate a discussion of the specified category, e.g. Announcements.'
+type: string
+required: false
+default: ''
+screenpackBranch:
+description: 'Ikemen-GO-Screenpack branch to bundle. Leave empty for master.'
+type: string
+required: false
+default: ''
+permissions:
+contents: write
+name: Windows-Only Release
+concurrency:
+group:  github.workflow -{{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+cancel-in-progress: true
+jobs:
+tag:
+name: prepare tag
+if: ${{ github.actor != 'dependabot[bot]' }}
+runs-on: ubuntu-latest
+outputs:
+version: ${{ steps.meta.outputs.version }}
+releaseTag: ${{ steps.meta.outputs.releaseTag }}
+releaseName: ${{ steps.meta.outputs.releaseName }}
+releaseKind: ${{ steps.meta.outputs.releaseKind }}
+artifactVersion: ${{ steps.meta.outputs.artifactVersion }}
+prerelease: ${{ steps.meta.outputs.prerelease }}
+makeLatest: ${{ steps.meta.outputs.makeLatest }}
+previousTag: ${{ steps.meta.outputs.previousTag }}
+buildTime: ${{ steps.meta.outputs.buildTime }}
+steps:
+- uses: actions/checkout@v7
+with:
+ref: ${{ github.sha }}
+fetch-depth: 0
+- name: Set version
+id: meta
+shell: bash
+env:
+INPUT_TAG: ${{ github.event.inputs.tag }}
+run: |
+set -euo pipefail
+ref_name="$GITHUB_REF_NAME"
+input_tag="${INPUT_TAG:-}"
+previous_tag=""
+release_name=""
+if [ -n "$input_tag" ]; then
+tag_pattern='^v(0|[1-9][0-9]).(0|[1-9][0-9]).(0|[1-9][0-9])(-rc.([1-9][0-9]))?$'
+if [[ ! "\(input_tag" =~ \)tag_pattern ]]; then
+echo "Invalid release tag: $input_tag" >&2
+exit 1
+fi
+version="$input_tag"
+release_tag="$input_tag"
+artifact_version="$input_tag"
+release_kind="tagged"
+prerelease="false"
+make_latest="true"
+else
+version="nightly"
+release_tag="nightly"
+artifact_version="nightly"
+release_kind="nightly"
+prerelease="true"
+make_latest="false"
+fi
+echo "version=version" >> "GITHUB_OUTPUT"
+echo "releaseTag=\(release_tag" >> "\)GITHUB_OUTPUT"
+echo "releaseName=${release_name:-release_tag}" >> "GITHUB_OUTPUT"
+echo "releaseKind=\(release_kind" >> "\)GITHUB_OUTPUT"
+echo "artifactVersion=\(artifact_version" >> "\)GITHUB_OUTPUT"
+echo "prerelease=prerelease" >> "GITHUB_OUTPUT"
+echo "makeLatest=\(make_latest" >> "\)GITHUB_OUTPUT"
+echo "previousTag=\(previous_tag" >> "\)GITHUB_OUTPUT"
+echo "buildTime=\((date -u '+\%Y.\%m.\%d')" >> "\)GITHUB_OUTPUT"
+build:
+name: prepare release
+if: ${{ github.actor != 'dependabot[bot]' }}
+needs: tag
+runs-on: windows-2022
+steps:
+- uses: actions/checkout@v7
+with:
+ref: ${{ github.sha }}
+- name: Setup Go
+uses: actions/setup-go@v7
+with:
+go-version: '1.27.x'
+cache: true
+- name: Setup MSYS2 (Windows)
+uses: msys2/setup-msys2@v2
+with:
+msystem: MINGW64
+update: true
+path-type: inherit
+install: >-
+git
+make
+diffutils
+mingw-w64-x86_64-pkg-config
+mingw-w64-x86_64-toolchain
+mingw-w64-x86_64-bzip2
+mingw-w64-x86_64-nasm
+mingw-w64-x86_64-tools-git
+mingw-w64-x86_64-SDL2
+mingw-w64-x86_64-libxmp
+- name: Prepare Vulkan SDK
+uses: humbletim/setup-vulkan-sdk@v1.2.1
+with:
+vulkan-query-version: 1.4.304.1
+vulkan-components: Vulkan-Headers, Vulkan-Loader
+vulkan-use-cache: true
+- name: Build (MSYS2)
+shell: 'msys2 {0}'
+env:
+BUILD_FFMPEG: "yes"
+GOOS: windows
+GOARCH: amd64
+CGO_ENABLED: "1"
+APP_VERSION: ${{ needs.tag.outputs.version }}
+APP_BUILDTIME: ${{ needs.tag.outputs.buildTime }}
+run: |
+go env -w GO111MODULE=on
+go mod download
+./build/build.sh Win64
+- name: Prepare release artifacts
+id: artifacts
+shell: bash
+run: |
+mkdir -p deploy/data
+cp "./Ikemen_GO.exe" deploy/
+mkdir -p deploy/lib
+cp -r lib/* deploy/lib/ 2>/dev/null || true
+SCREENPACK_BRANCH="${{ github.event.inputs.screenpackBranch || 'master' }}"
+git clone --branch "$SCREENPACK_BRANCH" --single-branch github.com
+cp -r data font external 
+Ikemen-GO-Screenpack/chars 
+Ikemen-GO-Screenpack/data 
+Ikemen-GO-Screenpack/font 
+Ikemen-GO-Screenpack/sound 
+Ikemen-GO-Screenpack/stages 
+Ikemen-GO-Screenpack/video 
+deploy/
+cp README.md deploy/
+GAMEPAD_DB_URL="githubusercontent.com"
+curl -L "$GAMEPAD_DB_URL" -o deploy/external/gamecontrollerdb.txt
+cp src/resources/defaultMotif.ini deploy/data/system.base.def
+cd deploy
+ARTIFACT_NAME=Ikemen_GO-dev-windows.zip
+echo "artifact=\(ARTIFACT_NAME" >> "\)GITHUB_OUTPUT"
+"/c/Program Files/7-Zip/7z.exe" a ../$ARTIFACT_NAME *
+- name: Stage release artifacts
+shell: bash
+run: |
+mkdir -p release-files
+cp -v "${{ steps.artifacts.outputs.artifact }}" release-files/
+- name: Upload release artifacts
+uses: actions/upload-artifact@v7
+with:
+name: release-windows
+path: release-files/*
+if-no-files-found: error
+release:
+name: publish release
+if: ${{ github.actor != 'dependabot[bot]' }}
+needs: [tag, build]
+runs-on: ubuntu-latest
+steps:
+- name: Check out source
+uses: actions/checkout@v7
+with:
+ref: ${{ github.sha }}
+fetch-depth: 0
+path: source
+- name: Download release artifacts
+uses: actions/download-artifact@v8
+with:
+pattern: release-*
+path: release-assets
+merge-multiple: true
+- name: Generate checksums
+shell: bash
+run: |
+(cd release-assets && sha256sum * > SHA256SUMS.txt)
+- name: Move rolling tag
+working-directory: source
+shell: bash
+run: |
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@github.com"
+tag="${{ needs.tag.outputs.releaseTag }}"
+git fetch --force --tags origin
+git tag -fa "tag" "GITHUB_SHA" -m "tag: GITHUB_SHA"
+git push --force origin "refs/tags/tag:refs/tags/tag"
+- name: Recreate rolling release metadata
+shell: bash
+env:
+GH_TOKEN: ${{ secrets.IKEMEN_TOKEN }}
+run: |
+tag="${{ needs.tag.outputs.releaseTag }}"
+if gh release view "tag" --repo "GITHUB_REPOSITORY" >/dev/null 2>&1; then
+gh release delete "tag" --repo "GITHUB_REPOSITORY" --yes
+fi
+- name: Publish release
+uses: ncipollo/release-action@v1.21.0
+with:
+token: ${{ secrets.IKEMEN_TOKEN }}
+artifactErrorsFailBuild: true
+artifacts: "release-assets/*"
+commit: ${{ github.sha }}
+tag: ${{ needs.tag.outputs.releaseTag }}
+name: ${{ needs.tag.outputs.releaseName }}
+allowUpdates: true
+replacesArtifacts: true
+prerelease: true
+makeLatest: false
+body: "This is a custom windows nightly build with restored preload logic."
