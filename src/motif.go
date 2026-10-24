@@ -737,11 +737,15 @@ type SelectInfoProperties struct {
 		Move struct {
 			Snd [2]int32 `ini:"snd" default:"-1,0"`
 		} `ini:"move"`
+		Swap struct {
+			Snd [2]int32 `ini:"snd" default:"-1,0"`
+		} `ini:"swap"`
 		Portrait struct {
 			AnimationStagePreloadProperties `skipinit:"true"`
 			Bg                              AnimationProperties `ini:"bg"`
 			Random                          AnimationProperties `ini:"random"`
 			Loading                         AnimationProperties `ini:"loading"`
+			Slot                            AnimationProperties `ini:"slot"`
 		} `ini:"portrait"`
 	} `ini:"stage"`
 	Done struct {
@@ -2755,7 +2759,7 @@ func (m *Motif) applyPostParsePosAdjustments() {
 	// Select Screen: Stage
 	{
 		st := &m.SelectInfo.Stage
-		offsetAnims(st.Pos[0], st.Pos[1], st.Portrait.Bg.AnimData, st.Portrait.Random.AnimData)
+		offsetAnims(st.Pos[0], st.Pos[1], st.Portrait.Bg.AnimData, st.Portrait.Random.AnimData, st.Portrait.Slot.AnimData)
 		offsetTexts(st.Pos[0], st.Pos[1], st.TextSpriteData, st.Active.TextSpriteData, st.Active2.TextSpriteData, st.Done.TextSpriteData)
 	}
 
@@ -2921,7 +2925,7 @@ func (mo *Motif) processStateChange(c *Char, states []int32) bool {
 	if len(states) == 0 {
 		for _, ch := range sys.chars[c.playerNo] {
 			if ch != nil {
-				ch.setSCF(SCF_disabled)
+				ch.setSCF(SCF_disabled, true)
 			}
 		}
 		return true
@@ -2935,7 +2939,7 @@ func (mo *Motif) processStateChange(c *Char, states []int32) bool {
 			// If the player slot was previously disabled, re-enable its loaded chars.
 			for _, ch := range sys.chars[c.playerNo] {
 				if ch != nil && ch.scf(SCF_disabled) {
-					ch.unsetSCF(SCF_disabled)
+					ch.setSCF(SCF_disabled, false)
 				}
 			}
 			c.changeState(stateNo, -1, -1, "")
@@ -3598,9 +3602,9 @@ func (ch *MotifChallenger) step(m *Motif) {
 	}
 
 	// These were a convenience. Motif should block these things directly or with system flags instead
-	//sys.setGSF(GSF_nobardisplay) // They already hide without this
-	//sys.setGSF(GSF_nomusic) // Checked in tickSound()
-	//sys.setGSF(GSF_timerfreeze) // Now redundant because game pauses
+	//sys.setGSF(GSF_nobardisplay, true) // They already hide without this
+	//sys.setGSF(GSF_nomusic, true) // Checked in tickSound()
+	//sys.setGSF(GSF_timerfreeze, true) // Now redundant because game pauses
 
 	if ch.counter == m.ChallengerInfo.Pause.Time {
 		// Motif shouldn't touch game variables
@@ -4780,12 +4784,12 @@ func (di *MotifDialogue) applyToken(m *Motif, line *DialogueParsedLine, token Di
 				stateNo := int32(v)
 				if stateNo == -1 {
 					for _, ch := range sys.chars[token.pn-1] {
-						ch.setSCF(SCF_disabled)
+						ch.setSCF(SCF_disabled, true)
 					}
 				} else if sys.chars[token.pn-1][0].selfStatenoExist(BytecodeInt(stateNo)) == BytecodeBool(true) {
 					for _, ch := range sys.chars[token.pn-1] {
 						if ch.scf(SCF_disabled) {
-							ch.unsetSCF(SCF_disabled)
+							ch.setSCF(SCF_disabled, false)
 						}
 					}
 					sys.chars[token.pn-1][0].changeState(int32(stateNo), -1, -1, "")
