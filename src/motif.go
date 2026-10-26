@@ -82,6 +82,8 @@ type FilesProperties struct {
 	Fight  string                     `ini:"fight" default:"fight.def" lookup:"def,,data/"`
 	Font   map[string]*FontProperties `ini:"map:^(?i)font[0-9]+$" lua:"font"`
 	Glyphs string                     `ini:"glyphs" lookup:"def,,data/"`
+	Mapping string                     `ini:"mapping" lookup:"def,,data/"`
+	Setup   string                     `ini:"setup" lookup:"def,,data/"`
 	Module string                     `ini:"module" lookup:"def,,data/"`
 	Model  string                     `ini:"model" lookup:"def,,data/"`
 }
@@ -305,6 +307,7 @@ type ControllerGlyphProperties struct {
 
 type HintProperties struct {
 	TextMapProperties
+	Warn TextMapProperties `ini:"warn"`
 }
 
 type MenuProperties struct {
@@ -1094,6 +1097,47 @@ type ResultsScreenProperties struct {
 	Hint HintProperties          `ini:"hint"`
 }
 
+type MappingControlProperties struct {
+	AnimationProperties
+	Alpha     [2]int32       `ini:"alpha" default:"-1,0"`
+	IdleAlpha [2]int32       `ini:"idlealpha" default:"0,255"`
+	Label     TextProperties `ini:"label"`
+	Rear      bool           `ini:"rear"`
+}
+
+type MappingInfoProperties struct {
+	FadeIn  FadeProperties    `ini:"fadein"`
+	FadeOut FadeProperties    `ini:"fadeout"`
+	Overlay OverlayProperties `ini:"overlay"`
+	Title   struct {
+		TextProperties
+		Uppercase bool `ini:"uppercase"`
+	} `ini:"title"`
+	Hint    HintProperties                       `ini:"hint"`
+	Front   AnimationProperties                  `ini:"front"`
+	Back    AnimationProperties                  `ini:"back"`
+	Rotate  AnimationProperties                  `ini:"rotate"`
+	Control map[string]*MappingControlProperties `ini:"control"`
+	Prompt  TextMapProperties                    `ini:"prompt"`
+	Move    struct {
+		Snd [2]int32 `ini:"snd" default:"-1,0"`
+	} `ini:"move"`
+	Done struct {
+		Snd [2]int32 `ini:"snd" default:"-1,0"`
+	} `ini:"done"`
+	Cancel struct {
+		Action []string `ini:"action"`
+		Snd    [2]int32 `ini:"snd" default:"-1,0"`
+	} `ini:"cancel"`
+	Skip struct {
+		Action []string `ini:"action"`
+	} `ini:"skip"`
+	Previous struct {
+		Action []string `ini:"action"`
+	} `ini:"previous"`
+	HoldTime int32            `ini:"holdtime" default:"60"`
+}
+
 type OptionInfoProperties struct {
 	FadeIn  FadeProperties `ini:"fadein"`
 	FadeOut FadeProperties `ini:"fadeout"`
@@ -1449,6 +1493,8 @@ type Motif struct {
 	Fnt             map[int]*Fnt
 	GlyphAnimations map[[2]int32]*Animation
 	GlyphsSff       *Sff
+	MappingSff      *Sff
+	SetupSff        *Sff
 	Model           *Model
 	Music           Music
 	Def             string                              `ini:"def"`
@@ -1476,6 +1522,10 @@ type Motif struct {
 	ResultsBgDef    map[string]*BgDefProperties         `ini:"map:^(?i).+resultsbgdef$" lua:"resultsbgdef"`
 	OptionInfo      OptionInfoProperties                `ini:"option_info"`
 	OptionBgDef     BgDefProperties                     `ini:"optionbgdef"`
+	MappingInfo     MappingInfoProperties               `ini:"mapping_info" sff:"MappingSff"`
+	MappingBgDef    BgDefProperties                     `ini:"mappingbgdef"`
+	SetupInfo       MappingInfoProperties               `ini:"setup_info" sff:"SetupSff"`
+	SetupBgDef      BgDefProperties                     `ini:"setupbgdef"`
 	ReplayInfo      ReplayInfoProperties                `ini:"replay_info"`
 	ReplayBgDef     BgDefProperties                     `ini:"replaybgdef"`
 	PauseMenu       map[string]*MenuInfoProperties      `ini:"map:^(?i).*pause.*menu$" lua:"pause_menu"`
@@ -2527,6 +2577,8 @@ func (m *Motif) overrideParams() {
 		// [Option Info]
 		{SrcSec: "Option Info", SrcPrefix: "menu.item.", DstSec: "Option Info", DstPrefix: "menu.item.selected."},
 		{SrcSec: "Option Info", SrcPrefix: "menu.item.active.", DstSec: "Option Info", DstPrefix: "menu.item.selected.active."},
+		// [Mapping Info]
+		{SrcSec: "Mapping Info", SrcPrefix: "hint.", DstSec: "Mapping Info", DstPrefix: "hint.warn."},
 		// [Pause Menu]
 		{SrcSec: "Pause Menu", SrcPrefix: "menu.item.", DstSec: "Pause Menu", DstPrefix: "menu.item.selected."},
 		{SrcSec: "Pause Menu", SrcPrefix: "menu.item.active.", DstSec: "Pause Menu", DstPrefix: "menu.item.selected.active."},
@@ -2729,6 +2781,40 @@ func (m *Motif) loadFiles() {
 		return nil
 	})
 	sys.keepAlive()
+	// Diagram art falls back to the screenpack sprites. A file is loaded once, even if
+	// several [Files] entries name it.
+	sffKey := func(path string) string { return filepath.ToSlash(filepath.Clean(path)) }
+	loaded := map[string]*Sff{sffKey(m.Files.Spr): m.Sff}
+	loadDiagramSff := func(file *string) *Sff {
+		if strings.TrimSpace(*file) == "" {
+			*file = m.Files.Spr
+			return m.Sff
+		}
+		var sprites *Sff
+		LoadFile(file, []string{*file}, "", func(filename string) error {
+			if filename == "" {
+				return nil
+			}
+			if s, ok := loaded[sffKey(filename)]; ok {
+				sprites = s
+				return nil
+			}
+			var err error
+			if sprites, err = loadSff(filename, SffTypeOther, true, false); err != nil {
+				LogMessage("Failed to load %v: %v", filename, err)
+			} else {
+				loaded[sffKey(filename)] = sprites
+			}
+			return nil
+		})
+		if sprites == nil {
+			sprites = newSff(SffTypeOther)
+		}
+		sys.keepAlive()
+		return sprites
+	}
+	m.MappingSff = loadDiagramSff(&m.Files.Mapping)
+	m.SetupSff = loadDiagramSff(&m.Files.Setup)
 
 	LoadFile(&m.Files.Model, []string{m.Files.Model}, "", func(filename string) error {
 		if filename != "" {
@@ -2766,6 +2852,16 @@ func (m *Motif) loadFiles() {
 	}
 
 	m.loadBgDefProperties(&m.OptionBgDef, "optionbg", m.Files.Spr)
+	if _, err := m.UserIniFile.GetSection("MappingBgDef"); err == nil {
+		m.loadBgDefProperties(&m.MappingBgDef, "mappingbg", m.Files.Spr)
+	} else {
+		m.MappingBgDef = m.OptionBgDef
+	}
+	if _, err := m.UserIniFile.GetSection("SetupBgDef"); err == nil {
+		m.loadBgDefProperties(&m.SetupBgDef, "setupbg", m.Files.Spr)
+	} else {
+		m.SetupBgDef = m.OptionBgDef
+	}
 	if _, err := m.UserIniFile.GetSection("ReplayBgDef"); err == nil {
 		m.loadBgDefProperties(&m.ReplayBgDef, "replaybg", m.Files.Spr)
 	} else {

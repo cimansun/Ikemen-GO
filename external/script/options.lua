@@ -2126,6 +2126,13 @@ function options.f_inputConfigFrame(context)
 	if device and device.kind == 'gamepad' and not getJoystickPresent(device.joy) then
 		context.closed = not options.f_editMapping(nil, context)
 	end
+	if not context.closed and context.diagram ~= nil then
+		options.f_inputDiagramFrame(context)
+		if not context.closed then
+			context.skipInput = false
+			return true
+		end
+	end
 	if not context.closed and context.current ~= nil then
 		drew = true
 		if context.capture ~= nil then
@@ -2157,12 +2164,14 @@ function options.f_inputConfigFrame(context)
 		resetKey()
 		resetTokenGuard()
 		esc(false)
+		options.editingInput = false
 		return false, drew
 	end
 	return true
 end
 
 local function runInputConfig(context)
+	options.editingInput = true
 	resetKey()
 	resetTokenGuard()
 	if context.pause then
@@ -2178,6 +2187,7 @@ local function runInputConfig(context)
 			refresh()
 		end
 	end
+	if not context.pause then options.editingInput = false end
 end
 
 -- Devices Button Mapping can edit: keyboard controllers (except on phones) and connected gamepads.
@@ -2285,6 +2295,44 @@ local function startInputCapture(tbl, item, all)
 	resetTokenGuard()
 end
 
+-- Reads one input for a capture, counted when let go, so holding cancel never binds it.
+-- 'virtual' reads virtual controls (id 0: every device), 'keyboard'/'gamepad' physical ones.
+local function releasedInput(state, id, kind)
+	local pressed, held = '', ''
+	if kind == 'virtual' then
+		pressed = inputGetVirtualPressed(id)
+		if state.pending ~= nil and inputDeviceActionTime(id, {state.pending}) > 0 then
+			held = state.pending
+		end
+	elseif kind == 'keyboard' then
+		pressed = getKey()
+		if pressed == 'nil' or pressed == 'ESCAPE' then
+			pressed = ''
+		end
+		if state.pending ~= nil and inputDeviceActionTime(id, {'KEY:' .. state.pending}) > 0 then
+			held = state.pending
+		end
+	else
+		-- Only a press after everything was let go, so one press can't fill two rows.
+		held = inputGetPhysicalHeld(id)
+		if held == '' then
+			state.released = true
+		elseif state.released and state.pending == nil then
+			pressed = held
+		end
+	end
+	if state.pending == nil then
+		if pressed ~= '' then
+			state.pending, state.released = pressed, false
+		end
+	elseif held ~= state.pending then
+		local token = state.pending
+		state.pending = nil
+		return token
+	end
+	return ''
+end
+
 -- One frame of capture. The cursor moves to each captured row in turn.
 function options.f_inputCapture(context)
 	local sec = motif.option_info
@@ -2301,37 +2349,12 @@ function options.f_inputCapture(context)
 		root.draft = capture.saved
 		finished = true
 	else
-		-- A press is bound when it is released, before it counts as holding cancel.
-		local token, pressed, held = '', '', ''
+		-- Setups bind virtual controls, read through the device's Button Mapping.
+		local token
 		if root.kind == 'setup' then
-			-- Setups bind virtual controls, read through the device's Button Mapping.
-			pressed = inputGetVirtualPressed(root.readDevice)
-			if capture.pending ~= nil and inputDeviceActionTime(root.readDevice, {capture.pending}) > 0 then
-				held = capture.pending
-			end
-		elseif device.kind == 'keyboard' then
-			pressed = getKey()
-			if pressed == 'ESCAPE' then
-				pressed = ''
-			end
-			if capture.pending ~= nil and inputDeviceActionTime(device.id, {'KEY:' .. capture.pending}) > 0 then
-				held = capture.pending
-			end
+			token = releasedInput(capture, root.readDevice, 'virtual')
 		else
-			-- Only a press after everything was let go, so one press can't fill two rows.
-			held = inputGetPhysicalHeld(device.id)
-			if held == '' then
-				capture.released = true
-			elseif capture.released and capture.pending == nil then
-				pressed = held
-			end
-		end
-		if capture.pending == nil then
-			if pressed ~= '' and pressed ~= 'nil' then
-				capture.pending, capture.released = pressed, false
-			end
-		elseif held ~= capture.pending then
-			token, capture.pending = capture.pending, nil
+			token = releasedInput(capture, device.id, device.kind)
 		end
 		if token ~= '' then
 			-- A key of the other keyboard controller stays there and leaves this control unused.
@@ -2371,15 +2394,266 @@ function options.f_inputCapture(context)
 	end
 end
 
+--;===========================================================
+--; INPUT DIAGRAMS ([Mapping Info], [Setup Info])
+--;===========================================================
+-- Virtual control names used by [Mapping Info].
+local t_mappingArt = {
+	DP_U = 'dpup', DP_D = 'dpdown', DP_L = 'dpleft', DP_R = 'dpright',
+	A = 'a', B = 'b', X = 'x', Y = 'y', START = 'start', BACK = 'back',
+	LB = 'leftshoulder', RB = 'rightshoulder', LT = 'lefttrigger', RT = 'righttrigger',
+	['LS_Y-'] = 'leftynegative', ['LS_Y+'] = 'leftypositive', ['LS_X-'] = 'leftxnegative', ['LS_X+'] = 'leftxpositive',
+	['RS_Y-'] = 'rightynegative', ['RS_Y+'] = 'rightypositive', ['RS_X-'] = 'rightxnegative', ['RS_X+'] = 'rightxpositive',
+	LS = 'leftstick', RS = 'rightstick',
+}
+
+-- Each direction display lights one arrow, including diagonals, or its center.
+local function diagramDirection(pressed, prefix, up, down, left, right)
+	local vertical, horizontal = '', ''
+	if up ~= down then vertical = up and 'up' or 'down' end
+	if left ~= right then horizontal = left and 'left' or 'right' end
+	local direction = vertical .. horizontal
+	pressed[prefix .. (direction == '' and 'neutral' or direction)] = true
+end
+
+local function setupDiagramState(root)
+	local held, analog = inputGetSetupState(root.device.id, root.draft)
+	local pressed = {}
+	for i = 5, #t_engineButtons do
+		local button = t_engineButtons[i]
+		pressed[button] = held[button]
+	end
+	diagramDirection(pressed, '', held.up or analog['LS_Y-'], held.down or analog['LS_Y+'],
+		held.left or analog['LS_X-'], held.right or analog['LS_X+'])
+	diagramDirection(pressed, 'rs', analog['RS_Y-'], analog['RS_Y+'], analog['RS_X-'], analog['RS_X+'])
+	return pressed
+end
+
+-- Leave the diagram screen.
+local function closeInputDiagram(context, finish)
+	if context.pause then
+		finish()
+		return
+	end
+	fadeOutInit(context.diagram.cfg.fadeout.FadeData)
+	context.diagram.finish = function()
+		finish()
+		fadeInInit(motif.option_info.fadein.FadeData)
+	end
+end
+
+-- Mapping editor rows name the virtual controls, so the guided screen reuses those names.
+local function mappingLabels(root)
+	local labels = {}
+	local function collect(menu)
+		for _, row in ipairs(menu.items) do
+			if t_mappingRows[row.itemname] then
+				labels[t_mappingRows[row.itemname]] = row.displayname
+			elseif menu.submenu[row.itemname] ~= nil then
+				collect(menu.submenu[row.itemname])
+			end
+		end
+	end
+	collect(root)
+	return labels
+end
+
+-- Both input editors share the diagram screen and keep their current drafts.
+function options.f_inputDiagram(context, mode, root)
+	local diagram = {mode = mode, index = 1, root = root, name = root.device.name, device = root.device.id}
+	diagram.setup = root.kind == 'setup'
+	diagram.cfg = diagram.setup and motif.setup_info or motif.mapping_info
+	diagram.background = diagram.setup and motif.setupbgdef or motif.mappingbgdef
+	diagram.order = {}
+	for key in main.f_sortKeys(diagram.cfg.control) do
+		table.insert(diagram.order, key)
+	end
+	diagram.controls = diagram.setup and {} or t_virtualControls
+	diagram.labels = mappingLabels(root)
+	diagram.saved = main.f_tableCopy(root.draft)
+	if mode == 'test' then
+		diagram.index = 0
+	end
+	context.diagram = diagram
+	if not context.pause then
+		bgReset(diagram.background.BGDef)
+		fadeInInit(diagram.cfg.fadein.FadeData)
+	end
+	resetKey()
+	resetTokenGuard()
+end
+
+function options.f_inputDiagramFrame(context)
+	local sec = motif.option_info
+	local diagram = context.diagram
+	local cfg = diagram.cfg
+	local background = context.background
+	if not context.pause then
+		background = diagram.background
+		clearColor(background.bgclearcolor[1], background.bgclearcolor[2], background.bgclearcolor[3])
+	end
+	local name = diagram.controls[diagram.index]
+	local control = name and cfg.control[t_mappingArt[name]]
+	local state = diagram.mode == 'test' and 'test' or 'default'
+	local pressed = {}
+	if diagram.mode == 'test' then
+		if diagram.setup then
+			pressed = setupDiagramState(diagram.root)
+		else
+			local held = inputGetVirtualState(diagram.device, diagram.root.draft)
+			for _, vc in ipairs(t_virtualControls) do
+				pressed[t_mappingArt[vc]] = held[vc]
+			end
+		end
+	end
+	local rear = control ~= nil and control.rear
+	for key, held in pairs(pressed) do
+		if held and cfg.control[key] ~= nil and cfg.control[key].rear then
+			rear = true
+		end
+	end
+	bgDraw(background.BGDef, 0)
+	rectDraw(cfg.overlay.RectData)
+	textImgReset(cfg.title.TextSpriteData)
+	textImgSetText(cfg.title.TextSpriteData, main.f_itemnameUpper(diagram.name, cfg.title.uppercase))
+	textImgDraw(cfg.title.TextSpriteData)
+	if rear then
+		main.f_animPosDraw(cfg.back.AnimData)
+		main.f_animPosDraw(cfg.rotate.AnimData)
+	else
+		main.f_animPosDraw(cfg.front.AnimData)
+	end
+	for _, key in ipairs(diagram.order) do
+		local art = cfg.control[key]
+		if art.rear == rear then
+			local active = key == t_mappingArt[name] or pressed[key]
+			if art.AnimData ~= nil and (active or art.idlealpha[1] ~= 0) then
+				local alpha = active and art.alpha or art.idlealpha
+				animSetAlpha(art.AnimData, alpha[1], alpha[2])
+				main.f_animPosDraw(art.AnimData)
+				animSetAlpha(art.AnimData, -1, 0)
+			end
+			textImgReset(art.label.TextSpriteData)
+			textImgDraw(art.label.TextSpriteData)
+		end
+	end
+	local label = diagram.setup and diagram.root.draft.name or (diagram.labels[name or ''] or name or '')
+	-- Config all has nothing left to ask while it fades out.
+	if name ~= nil or state ~= 'default' then
+		textImgReset(cfg.prompt.TextSpriteData)
+		textImgSetText(cfg.prompt.TextSpriteData, main.f_formatBySpec(cfg.prompt.text[state], {
+			s = label, i = diagram.index,
+		}))
+		textImgDraw(cfg.prompt.TextSpriteData)
+	end
+	bgDraw(background.BGDef, 1)
+	-- A refused key shows hint.warn until another key is accepted or the control is left.
+	if diagram.warn ~= nil then
+		textImgReset(cfg.hint.warn.TextSpriteData)
+		textImgSetText(cfg.hint.warn.TextSpriteData, cfg.hint.warn.text[diagram.warn] or '')
+		textImgDraw(cfg.hint.warn.TextSpriteData)
+	else
+		main.f_hintDraw(cfg.hint, state, nil, diagram.device)
+	end
+	if diagram.finish ~= nil then
+		if not fadeActive() then
+			diagram.finish()
+		end
+		return
+	end
+	if context.skipInput or fadeActive() then
+		return
+	end
+	local function close(finish)
+		closeInputDiagram(context, function()
+			context.diagram = nil
+			if finish ~= nil then
+				finish()
+			end
+			context.closed = context.current == nil
+		end)
+	end
+	-- Held actions use the saved mapping of the edited device and the device running the menu.
+	local menuDevice = inputGetMenuDevice()
+	local function holdTime(action)
+		local time = inputDeviceActionTime(diagram.device, action)
+		if menuDevice ~= diagram.device then
+			time = math.max(time, inputDeviceActionTime(menuDevice, action))
+		end
+		return time
+	end
+	local function held(action)
+		return holdTime(action) == cfg.holdtime
+	end
+	if esc() or holdTime(cfg.cancel.action) >= cfg.holdtime then
+		-- Cancel restores the draft from before guided capture.
+		sndPlay(motif.Snd, cfg.cancel.snd[1], cfg.cancel.snd[2])
+		esc(false)
+		if diagram.mode == 'guided' then
+			diagram.root.draft = diagram.saved
+			updateEditor(diagram.root, diagram.root)
+		end
+		close()
+	elseif diagram.mode == 'test' then
+		-- Read-only: inputs only highlight the diagram.
+	elseif held(cfg.previous.action) and diagram.index > 1 then
+		diagram.index, diagram.pending, diagram.released, diagram.warn = diagram.index - 1, nil, false, nil
+		sndPlay(motif.Snd, cfg.move.snd[1], cfg.move.snd[2])
+	elseif name ~= nil and held(cfg.skip.action) then
+		diagram.index, diagram.pending, diagram.released, diagram.warn = diagram.index + 1, nil, false, nil
+		sndPlay(motif.Snd, cfg.move.snd[1], cfg.move.snd[2])
+	elseif name ~= nil then
+		-- Guided Button Mapping: one physical input for each virtual control.
+		local root = diagram.root
+		local token = releasedInput(diagram, diagram.device, root.device.kind)
+		if token ~= '' then
+			-- A key of the other keyboard controller is refused: wait for another one.
+			if keyTaken(root.device, token) then
+				diagram.warn = 'keytaken'
+				sndPlay(motif.Snd, cfg.cancel.snd[1], cfg.cancel.snd[2])
+			else
+				for _, vc in ipairs(t_virtualControls) do
+					if root.draft[vc] == token then
+						root.draft[vc] = '-'
+					end
+				end
+				root.draft[name] = token
+				diagram.index, diagram.warn = diagram.index + 1, nil
+				sndPlay(motif.Snd, cfg.done.snd[1], cfg.done.snd[2])
+			end
+		end
+	end
+	if diagram.mode == 'guided' and diagram.index > #diagram.controls and diagram.finish == nil then
+		updateEditor(diagram.root, diagram.root)
+		close()
+	end
+	resetKey()
+	resetTokenGuard()
+end
+
 -- Editor rows. One handler serves both editors: it reads the kind from the menu root.
+-- Button Mapping uses the guided controller screen; Controller Setup moves the cursor row by row.
 options.t_itemname.configall = function(t, item)
 	if getAction(-1, motif.option_info.menu.done.action) then
 		sndPlay(motif.Snd, motif.option_info.cursor.done.snd[1], motif.option_info.cursor.done.snd[2])
-		startInputCapture(t, item, true)
+		if t.inputMenu.kind == 'mapping' then
+			options.f_inputDiagram(t.inputContext, 'guided', t.inputMenu)
+		else
+			startInputCapture(t, item, true)
+		end
 	end
 	resetKey()
 	return true
 end
+
+options.t_itemname.testmapping = function(t, item)
+	if getAction(-1, motif.option_info.menu.done.action) then
+		sndPlay(motif.Snd, motif.option_info.cursor.done.snd[1], motif.option_info.cursor.done.snd[2])
+		options.f_inputDiagram(t.inputContext, 'test', t.inputMenu)
+	end
+	return true
+end
+options.t_itemname.testsetup = options.t_itemname.testmapping
 
 local function bindingRow(t, item)
 	local sec = motif.option_info
