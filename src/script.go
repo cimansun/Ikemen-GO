@@ -3702,6 +3702,10 @@ func systemScriptInit(l *lua.LState) {
 				v = ib.wb
 			case "m":
 				v = ib.mb
+			case "l":
+				v = ib.lb
+			case "r":
+				v = ib.rb
 			default:
 				// Other raw controller tokens (RS_*, LT/RT, etc): just report held (1) or not (0).
 				if idx, ok := StringToButtonLUT[key]; ok && idx != 25 {
@@ -6236,6 +6240,10 @@ func systemScriptInit(l *lua.LState) {
 					sys.keyConfig[pn-1].bW = btn
 				case 14:
 					sys.keyConfig[pn-1].bM = btn
+				case 15:
+					sys.keyConfig[pn-1].bL = btn
+				case 16:
+					sys.keyConfig[pn-1].bR = btn
 				}
 			} else {
 				btn := StringToButtonLUT[lua.LVAsString(value)]
@@ -6268,6 +6276,10 @@ func systemScriptInit(l *lua.LState) {
 					sys.joystickConfig[pn-1].bW = btn
 				case 14:
 					sys.joystickConfig[pn-1].bM = btn
+				case 15:
+					sys.joystickConfig[pn-1].bL = btn
+				case 16:
+					sys.joystickConfig[pn-1].bR = btn
 				}
 			}
 		})
