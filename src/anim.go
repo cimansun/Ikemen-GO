@@ -2395,6 +2395,11 @@ func (a *Anim) SetColorKey(mask int16) {
 
 func (a *Anim) SetAlpha(src, dst int16) {
 	a.anim.srcAlpha, a.anim.dstAlpha = src, dst
+	if src < 0 {
+		a.anim.transType = TT_default
+	} else {
+		a.anim.transType = TT_add
+	}
 }
 
 func (a *Anim) SetLocalcoord(lx, ly float32) {
