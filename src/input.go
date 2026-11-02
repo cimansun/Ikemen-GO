@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	mgl "github.com/go-gl/mathgl/mgl32"
 	"github.com/veandco/go-sdl2/sdl"
 )
 
@@ -173,6 +174,360 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 	}
 }
 
+// Mouse buttons in motif actions, as "MOUSE:<name>". Wheel directions count as
+// buttons that stay pressed for one frame.
+var mouseButtonNames = [...]string{"LEFT", "RIGHT", "MIDDLE", "X1", "X2",
+	"WHEELUP", "WHEELDOWN", "WHEELLEFT", "WHEELRIGHT"}
+
+const mouseClickButtons = 5 // LEFT to X2; the wheel directions follow
+
+func actionMouse(token string) (int, bool) {
+	token = strings.TrimSpace(token)
+	if len(token) > 6 && strings.EqualFold(token[:6], "MOUSE:") {
+		for i, name := range mouseButtonNames {
+			if strings.EqualFold(name, token[6:]) {
+				return i, true
+			}
+		}
+	}
+	return -1, false
+}
+
+// The mouse is a UI input next to the controllers. It acts as the device that
+// shows the hints and never reaches character commands.
+type MouseInput struct {
+	x, y    int32
+	down    [mouseClickButtons]bool
+	clicked [mouseClickButtons]bool // pressed since the last frame, so short clicks count
+	wheel   [2]int32
+	held    [len(mouseButtonNames)]int32
+	taken   [len(mouseButtonNames)]bool
+	active  bool // used last, so hints show mouse buttons
+	motion  bool // moved since the last frame
+	moved   bool // moved this frame
+	remote  bool // read from a synchronized menu packet
+
+	// An action pressed by clicking what it selects, for one frame.
+	press       []string
+	pressPlayer int
+	pressFrame  int32
+}
+
+func (m *MouseInput) enabled() bool {
+	return m.remote || sys.motif.Mouse.Enabled
+}
+
+// Advances held times, once per frame from pollDevices.
+func (m *MouseInput) step() {
+	for i := 0; i < mouseClickButtons; i++ {
+		if m.down[i] || m.clicked[i] {
+			m.held[i]++
+		} else {
+			m.held[i] = 0
+		}
+	}
+	m.clicked = [mouseClickButtons]bool{}
+	for i, on := range [4]bool{m.wheel[1] > 0, m.wheel[1] < 0, m.wheel[0] < 0, m.wheel[0] > 0} {
+		m.held[mouseClickButtons+i] = 0
+		if on {
+			m.held[mouseClickButtons+i] = 1
+		}
+	}
+	m.wheel = [2]int32{}
+	m.taken = [len(mouseButtonNames)]bool{}
+	m.moved, m.motion = m.motion, false
+}
+
+func (m *MouseInput) release() {
+	m.down, m.clicked, m.wheel = [mouseClickButtons]bool{}, [mouseClickButtons]bool{}, [2]int32{}
+}
+
+// Frames a button has been held, or 0 while the pointer is outside the game.
+func (m *MouseInput) time(button int) int32 {
+	sys.pollDevices()
+	if !m.enabled() || m.taken[button] {
+		return 0
+	}
+	if m.remote {
+		if !m.active {
+			return 0
+		}
+	} else {
+		if _, _, inside := m.position(); !inside {
+			return 0
+		}
+	}
+	return m.held[button]
+}
+
+// Frames the mouse buttons of an action have been held.
+func (m *MouseInput) actionTime(action []string) int32 {
+	for _, token := range action {
+		if button, ok := actionMouse(token); ok {
+			if t := m.time(button); t > 0 {
+				return t
+			}
+		}
+	}
+	return 0
+}
+
+// Takes the mouse buttons of an action pressed this frame, so no other action
+// reads them. Used when a click lands on, or misses, something on screen.
+func (m *MouseInput) take(action []string) bool {
+	taken := false
+	for _, token := range action {
+		if button, ok := actionMouse(token); ok && m.time(button) == 1 {
+			m.taken[button], taken = true, true
+		}
+	}
+	return taken
+}
+
+// Presses a whole action for this frame, for example after clicking a menu row.
+// player is a 0-based slot, or -1 for any.
+func (m *MouseInput) pressAction(action []string, player int) {
+	m.press, m.pressPlayer, m.pressFrame = append([]string(nil), action...), player, sys.frameCounter
+}
+
+// Reports and clears an action pressed by pressAction.
+func (m *MouseInput) pressed(action []string, player int) bool {
+	if m.press == nil || m.pressFrame != sys.frameCounter || len(m.press) != len(action) ||
+		m.pressPlayer >= 0 && player >= 0 && m.pressPlayer != player {
+		return false
+	}
+	for i := range action {
+		if !strings.EqualFold(strings.TrimSpace(action[i]), strings.TrimSpace(m.press[i])) {
+			return false
+		}
+	}
+	m.press = nil
+	return true
+}
+
+// Converts the mouse position in the window into the coordinates used to draw sprites.
+func (m *MouseInput) position() (float32, float32, bool) {
+	if !m.enabled() || sys.window == nil || !sys.window.Focused() {
+		return 0, 0, false
+	}
+	w, h := sys.window.GetSize()
+	dw, dh := sys.window.GetDrawablePixelSize()
+	vx, vy, vw, vh := sys.window.GetScaledViewportSize()
+	viewport := sys.currentDrawViewport()
+	if w <= 0 || h <= 0 || vw <= 0 || vh <= 0 || viewport[2] <= 0 || viewport[3] <= 0 {
+		return 0, 0, false
+	}
+	x := float32(m.x)*float32(dw)/float32(w) - float32(vx)
+	y := float32(m.y)*float32(dh)/float32(h) - float32(vy)
+	x = x*float32(sys.renderTargetRect[2])/float32(vw) - float32(viewport[0])
+	y = y*float32(sys.renderTargetRect[3])/float32(vh) - float32(viewport[1])
+	return x * float32(sys.scrrect[2]) / float32(viewport[2]), y * float32(sys.scrrect[3]) / float32(viewport[3]),
+		x >= 0 && y >= 0 && x < float32(viewport[2]) && y < float32(viewport[3])
+}
+
+func (m *MouseInput) over(bounds [4]int32) bool {
+	x, y, inside := m.position()
+	return inside && x >= float32(bounds[0]) && y >= float32(bounds[1]) &&
+		x < float32(bounds[0]+bounds[2]) && y < float32(bounds[1]+bounds[3])
+}
+
+// The payload is a menu generation, a 24-bit target and an event sequence.
+type MenuMouse struct {
+	input      MouseInput
+	context    string
+	generation uint16
+	received   uint16
+	target     uint32
+	sequence   byte
+	seen       bool
+	frame      int32
+}
+
+func (m *MenuMouse) setContext(context string) {
+	if m.context != context {
+		m.context = context
+		m.generation++
+	}
+}
+
+func (m *MenuMouse) step(f VirtualFrame) {
+	if m.seen && m.frame == sys.uiFrameCounter {
+		return
+	}
+	m.frame = sys.uiFrameCounter
+	sequence := byte(f.Axes[5])
+	fresh := !m.seen || sequence != m.sequence
+	m.seen, m.sequence = true, sequence
+	m.input.remote = true
+	m.input.active = f.isMenu() && f.Buttons&(1<<10) != 0
+	m.input.moved = m.input.active && fresh && f.Buttons&(1<<9) != 0
+	m.input.taken = [len(mouseButtonNames)]bool{}
+	for i := range m.input.held {
+		if f.isMenu() && f.Buttons&(1<<uint(i)) != 0 && (i < mouseClickButtons || fresh) {
+			m.input.held[i]++
+		} else {
+			m.input.held[i] = 0
+		}
+		if i >= mouseClickButtons && m.input.held[i] > 0 {
+			m.input.held[i] = 1
+		}
+	}
+	m.received = uint16(byte(f.Axes[0])) | uint16(byte(f.Axes[1]))<<8
+	m.target = uint32(byte(f.Axes[2])) | uint32(byte(f.Axes[3]))<<8 | uint32(byte(f.Axes[4]))<<16
+}
+
+func (m *MenuMouse) available() bool {
+	return m.input.active && m.received == m.generation
+}
+
+func (m *MouseInput) packet(generation uint16, target uint32) VirtualFrame {
+	sys.pollDevices()
+	f := VirtualFrame{Buttons: virtualFrameMenu, Axes: [6]int8{
+		int8(generation), int8(generation >> 8), int8(target), int8(target >> 8), int8(target >> 16), int8(sys.frameCounter),
+	}}
+	if _, _, inside := m.position(); !inside || !m.active {
+		return f
+	}
+	f.Buttons |= 1 << 10
+	if m.moved {
+		f.Buttons |= 1 << 9
+	}
+	for i, held := range m.held {
+		if held > 0 {
+			f.Buttons |= 1 << uint(i)
+		}
+	}
+	return f
+}
+
+func (m *MouseInput) overText(ts *TextSprite) bool {
+	if ts == nil || ts.fnt == nil || ts.xscl == 0 || ts.yscl == 0 || !m.over(ts.drawWindow()) {
+		return false
+	}
+	for i, line := range strings.Split(ts.decodeEscapes(ts.text), "\n") {
+		width := float32(ts.TextWidth(line)) * ts.xscl
+		height := float32(ts.fnt.Size[1]) * ts.yscl
+		x := ts.x + ts.vel[0] + ts.xshear*float32(ts.fnt.offset[1])*ts.yscl
+		y := ts.y + ts.vel[1] + float32(i)*(float32(ts.fnt.Size[1])+float32(ts.fnt.Spacing[1])+ts.textSpacing[1])*ts.yscl
+		if ts.align == -1 {
+			x += ts.localScale
+		}
+		var rcx, rcy float32
+		if ts.fnt.Type == "truetype" {
+			x += float32(ts.fnt.offset[0])*ts.xscl + float32(sys.gameWidth-320)/2
+			rcx, rcy = x, y
+			y -= height
+		} else {
+			x, y, rcx, rcy = ts.fnt.textPosition(x, y, ts.xscl, ts.yscl, ts.rot)
+		}
+		if ts.align == 0 {
+			x -= width / 2
+		} else if ts.align == -1 {
+			x -= width
+		}
+		if ts.fnt.Type == "truetype" {
+			x1, y1, x2, y2, x3, y3, x4, y4 := transformTextQuad(x+width, y, x, y, x, y+height, x+width, y+height,
+				-ts.xshear, ts.rot, ts.projection, ts.fLength, rcx, rcy)
+			if m.overQuad([4][2]float32{{x1 * sys.widthScale, y1 * sys.heightScale}, {x2 * sys.widthScale, y2 * sys.heightScale},
+				{x3 * sys.widthScale, y3 * sys.heightScale}, {x4 * sys.widthScale, y4 * sys.heightScale}}) {
+				return true
+			}
+		} else if m.overSprite(RenderParams{
+			size: [2]uint16{1, 1}, x: -x * sys.widthScale, y: -y * sys.heightScale,
+			xts: width * sys.widthScale, xbs: width * sys.widthScale, ys: height * sys.heightScale,
+			vs: 1, xas: 1, yas: 1, rxadd: -ts.xshear, rot: ts.rot, rcx: rcx, rcy: rcy,
+			projectionMode: ts.projection, fLength: ts.fLength * sys.heightScale,
+		}, nil) {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether the pointer is inside a four-cornered shape, so rotated and tilted
+// sprites are hit where they appear. Coordinates are screen pixels.
+func (m *MouseInput) overQuad(quad [4][2]float32) bool {
+	x, y, inside := m.position()
+	if !inside {
+		return false
+	}
+	var positive, negative bool
+	var area float32
+	for i, a := range quad {
+		b := quad[(i+1)%len(quad)]
+		cross := (b[0]-a[0])*(y-a[1]) - (b[1]-a[1])*(x-a[0])
+		positive = positive || cross > 0.01
+		negative = negative || cross < -0.01
+		area += a[0]*b[1] - b[0]*a[1]
+	}
+	return Abs(area) > 0.01 && !(positive && negative)
+}
+
+// With pixels set, transparent parts of the sprite don't count.
+func (m *MouseInput) overAnim(a *Anim, pixels bool) bool {
+	if a == nil || a.anim == nil || a.anim.isBlank() || a.anim.spr == nil || !m.over(a.drawWindow()) {
+		return false
+	}
+	rp := a.drawParams()
+	if !rp.IsValid() {
+		return false
+	}
+	var opaque func(float32, float32) bool
+	if pixels && rp.mask != -1 && len(a.anim.spr.hitPixels) > 0 {
+		opaque = func(u, v float32) bool {
+			var pal []uint32
+			if a.anim.spr.coldepth <= 8 {
+				pal, _ = a.anim.pal(a.palfx)
+			}
+			return a.anim.spr.opaqueAt(u, v, pal)
+		}
+	}
+	return m.overSprite(rp, opaque)
+}
+
+func (m *MouseInput) overSprite(rp RenderParams, opaque func(float32, float32) bool) bool {
+	initRenderSpriteQuad(&rp)
+	matrix, quad := spriteQuad(mgl.Translate3D(0, float32(sys.scrrect[3]), 0), rp)
+	var invW [4]float32
+	for i, point := range quad {
+		v := matrix.Mul4x1(mgl.Vec4{point[0], point[1], 0, 1})
+		if v.W() <= 0 || !IsFinite(v.X()+v.Y()+v.W()) {
+			return false
+		}
+		quad[i] = [2]float32{v.X() / v.W(), float32(sys.scrrect[3]) - v.Y()/v.W()}
+		invW[i] = 1 / v.W()
+	}
+	if !m.overQuad(quad) {
+		return false
+	}
+	if opaque == nil {
+		return true
+	}
+	// Find the texture position under the pointer the same way the sprite is drawn,
+	// including perspective, rotation and flips.
+	uv := [4][2]float32{{spriteUVBias, 1 - spriteUVBias}, {1, 1 - spriteUVBias}, {1, 0}, {spriteUVBias, 0}}
+	x, y, _ := m.position()
+	for _, tri := range [2][3]int{{0, 1, 2}, {0, 2, 3}} {
+		a, b, c := quad[tri[0]], quad[tri[1]], quad[tri[2]]
+		dx1, dy1, dx2, dy2 := b[0]-a[0], b[1]-a[1], c[0]-a[0], c[1]-a[1]
+		det := dx1*dy2 - dy1*dx2
+		if det == 0 {
+			continue
+		}
+		wb := ((x-a[0])*dy2 - (y-a[1])*dx2) / det
+		wc := (dx1*(y-a[1]) - dy1*(x-a[0])) / det
+		wa := 1 - wb - wc
+		if wa < 0 || wb < 0 || wc < 0 {
+			continue
+		}
+		wa, wb, wc = wa*invW[tri[0]], wb*invW[tri[1]], wc*invW[tri[2]]
+		u := (wa*uv[tri[0]][0] + wb*uv[tri[1]][0] + wc*uv[tri[2]][0]) / (wa + wb + wc)
+		v := (wa*uv[tri[0]][1] + wb*uv[tri[1]][1] + wc*uv[tri[2]][1]) / (wa + wb + wc)
+		return opaque(u, v)
+	}
+	return false
+}
+
 type TextInput struct {
 	active, accepted, release   bool
 	closedByAction              bool
@@ -183,6 +538,7 @@ type TextInput struct {
 	device                      int
 	held                        [VC_Count]int32
 	waitRelease                 bool
+	waitMouseRelease            bool // the click that opened the keyboard is still down
 	frame                       int32
 	time                        int32 // -1 unless the caller supplies a countdown.
 	selected, pressed           int
@@ -203,8 +559,8 @@ func (t *TextInput) open(title, value string, maximum, deviceID int) error {
 		return fmt.Errorf("text input is already open")
 	}
 	device := sys.glyphDevice(deviceID)
-	*t = TextInput{active: true, keyboard: true, title: title, initial: value,
-		maximum: maximum, frame: -1, time: -1, pressed: -1, waitRelease: true}
+	*t = TextInput{active: true, keyboard: !(sys.mouse.active && sys.mouse.enabled()), title: title, initial: value,
+		maximum: maximum, frame: -1, time: -1, pressed: -1, waitRelease: true, waitMouseRelease: true}
 	if maximum <= 0 {
 		t.maximum = Max(1, sys.motif.KeyboardInfo.MaxLength)
 	}
@@ -255,6 +611,11 @@ func (t *TextInput) finish(accepted bool) {
 func (t *TextInput) releaseInputs() {
 	if !t.release {
 		return
+	}
+	for _, down := range sys.mouse.down {
+		if down {
+			return
+		}
 	}
 	for _, down := range sys.keyState {
 		if down {
@@ -356,27 +717,34 @@ func (t *TextInput) action(action string, playSound bool) {
 	sys.motif.Snd.play(sound, 100, 0, 0, 0, 0)
 }
 
-// SDL text commits and editing keys have separate paths. A typed letter must
-// never also activate the action bound to that physical key.
-func (t *TextInput) key(key Key, repeat bool) {
+type textInputAction struct {
+	action []string
+	name   string
+	repeat bool // repeats while held
+}
+
+// The editing actions of [Keyboard Info], shared by every input that drives it.
+func textInputActions() []textInputAction {
 	k := &sys.motif.KeyboardInfo
-	t.keyboard = true
-	// Let the IME handle its own editing keys until its text is committed.
-	if t.composition != "" {
-		return
-	}
-	for _, entry := range []struct {
-		action []string
-		name   string
-		repeat bool
-	}{
+	return []textInputAction{
 		{k.Done.Action, "done", false}, {k.Cancel.Action, "cancel", false},
 		{k.Backspace.Action, "backspace", true}, {k.Delete.Action, "delete", true},
 		{k.Shift.Action, "shift", false}, {k.Page.Action, "page", false},
 		{k.Paste.Action, "paste", false},
 		{k.Cursor.Previous.Action, "previous", true}, {k.Cursor.Next.Action, "next", true},
 		{k.Cursor.Start.Action, "start", false}, {k.Cursor.End.Action, "end", false},
-	} {
+	}
+}
+
+// SDL text commits and editing keys have separate paths. A typed letter must
+// never also activate the action bound to that physical key.
+func (t *TextInput) key(key Key, repeat bool) {
+	t.keyboard = true
+	// Let the IME handle its own editing keys until its text is committed.
+	if t.composition != "" {
+		return
+	}
+	for _, entry := range textInputActions() {
 		if actionHasKey(entry.action, key) {
 			if !repeat || entry.repeat {
 				t.action(entry.name, false)
@@ -412,6 +780,9 @@ func (t *TextInput) step() {
 		return
 	}
 	t.frame, t.pressed = sys.frameCounter, -1
+	if t.stepMouse() {
+		return
+	}
 	device := sys.inputs.device(t.device)
 	if t.device != 0 && (device == nil || !device.Connected) {
 		t.finish(false)
@@ -457,20 +828,10 @@ func (t *TextInput) step() {
 		}
 	}
 	k := &sys.motif.KeyboardInfo
-	for _, entry := range []struct {
-		keys   []string
-		action string
-	}{
-		{k.Cancel.Action, "cancel"}, {k.Done.Action, "done"},
-		{k.Backspace.Action, "backspace"}, {k.Delete.Action, "delete"},
-		{k.Shift.Action, "shift"}, {k.Page.Action, "page"}, {k.Paste.Action, "paste"},
-		{k.Cursor.Previous.Action, "previous"}, {k.Cursor.Next.Action, "next"},
-		{k.Cursor.Start.Action, "start"}, {k.Cursor.End.Action, "end"},
-	} {
-		repeat := entry.action == "backspace" || entry.action == "delete" || entry.action == "previous" || entry.action == "next"
-		if t.button(entry.keys, repeat) {
+	for _, entry := range textInputActions() {
+		if t.button(entry.action, entry.repeat) {
 			t.keyboard = false
-			t.action(entry.action, true)
+			t.action(entry.name, true)
 			return
 		}
 	}
@@ -483,18 +844,84 @@ func (t *TextInput) step() {
 	} else if t.button(k.Right.Action, true) {
 		t.move(1, 0)
 	} else if len(t.keys) > 0 && t.button(k.Select.Action, false) {
-		t.keyboard, t.pressed = false, t.selected
-		key := t.keys[t.selected].text
-		if strings.HasPrefix(key, "{") && strings.HasSuffix(key, "}") {
-			t.action(key[1:len(key)-1], true)
-		} else {
-			sound := k.Done.Snd
-			if !t.insert(key) {
-				sound = k.Cancel.Snd
+		t.selectKey()
+	}
+}
+
+// Types or runs the selected key.
+func (t *TextInput) selectKey() {
+	k := &sys.motif.KeyboardInfo
+	t.keyboard, t.pressed = false, t.selected
+	key := t.keys[t.selected].text
+	if strings.HasPrefix(key, "{") && strings.HasSuffix(key, "}") {
+		t.action(key[1:len(key)-1], true)
+	} else {
+		sound := k.Done.Snd
+		if !t.insert(key) {
+			sound = k.Cancel.Snd
+		}
+		sys.motif.Snd.play(sound, 100, 0, 0, 0, 0)
+	}
+}
+
+// Mouse buttons of the [Keyboard Info] actions. Reports whether the mouse
+// did something this frame.
+func (t *TextInput) stepMouse() bool {
+	if !sys.mouse.enabled() {
+		return false
+	}
+	sys.pollDevices()
+	if sys.mouse.active {
+		t.keyboard = false
+	}
+	if t.waitMouseRelease {
+		for i, down := range sys.mouse.down {
+			if down || sys.mouse.held[i] > 0 {
+				return false
 			}
-			sys.motif.Snd.play(sound, 100, 0, 0, 0, 0)
+		}
+		t.waitMouseRelease = false
+	}
+	// The keys are laid out in motif coordinates.
+	previous := sys.captureAspectState()
+	sys.restoreAspectState(sys.motifAspectState())
+	defer sys.restoreAspectState(previous)
+	k := &sys.motif.KeyboardInfo
+	// Pointing at a key selects it, a click types it.
+	if bg := k.Key.Bg.RectData; bg != nil {
+		for i, key := range t.keys {
+			bounds := *bg
+			bounds.SetWindow(key.rect)
+			if !sys.mouse.over(bounds.drawWindow()) {
+				continue
+			}
+			if sys.mouse.moved {
+				t.selected = i
+			}
+			if sys.mouse.actionTime(k.Select.Action) == 1 {
+				t.selected = i
+				t.selectKey()
+				return true
+			}
+			break
 		}
 	}
+	for _, entry := range textInputActions() {
+		if sys.mouse.actionTime(entry.action) == 1 {
+			t.action(entry.name, true)
+			return true
+		}
+	}
+	for _, move := range []struct {
+		action []string
+		x, y   int
+	}{{k.Up.Action, 0, -1}, {k.Down.Action, 0, 1}, {k.Left.Action, -1, 0}, {k.Right.Action, 1, 0}} {
+		if sys.mouse.actionTime(move.action) == 1 {
+			t.move(move.x, move.y)
+			return true
+		}
+	}
+	return false
 }
 
 // Builds the key grid for the current layout (lower or upper case).
@@ -739,8 +1166,7 @@ func (vc VirtualControl) analog() bool {
 	return vc >= 0 && vc < VC_Count && virtualButtonBit[vc] < 0
 }
 
-// One frame of virtual controller state. It is exactly what netplay and
-// replays store per player: 14 button bits and 6 axes in 8 bytes.
+// Netplay and replays store eight bytes per player, for a controller or a menu pointer.
 type VirtualFrame struct {
 	Buttons uint16
 	Axes    [6]int8 // LS_X, LS_Y, RS_X, RS_Y, LT, RT. Triggers stay in 0..127.
@@ -748,8 +1174,18 @@ type VirtualFrame struct {
 
 const virtualFrameBytes = 8
 
-// Bits 14 and 15 are never set, so delay netplay can keep -1 as its end marker.
 const virtualFrameButtonMask = 0x3fff
+const virtualFrameMenu = 0x4000 // Bit 15 stays clear for delay netplay's end marker.
+
+func (f VirtualFrame) isMenu() bool { return f.Buttons&virtualFrameMenu != 0 }
+
+// Menu payloads must not pass through axis normalization or Controller Setup.
+func (f VirtualFrame) controller() VirtualFrame {
+	if f.isMenu() {
+		return VirtualFrame{}
+	}
+	return f
+}
 
 func (f VirtualFrame) encode() []byte {
 	b := make([]byte, virtualFrameBytes)
@@ -765,18 +1201,20 @@ func decodeVirtualFrame(b []byte) VirtualFrame {
 	if len(b) < virtualFrameBytes {
 		return f
 	}
-	f.Buttons = (uint16(b[0]) | uint16(b[1])<<8) & virtualFrameButtonMask
+	f.Buttons = (uint16(b[0]) | uint16(b[1])<<8) & 0x7fff
 	for i := range f.Axes {
 		f.Axes[i] = int8(b[2+i])
 	}
 	// A trigger never rests below zero.
-	f.Axes[4], f.Axes[5] = int8(Max(int32(f.Axes[4]), 0)), int8(Max(int32(f.Axes[5]), 0))
+	if !f.isMenu() {
+		f.Axes[4], f.Axes[5] = int8(Max(int32(f.Axes[4]), 0)), int8(Max(int32(f.Axes[5]), 0))
+	}
 	return f
 }
 
 // How far a control is pushed, from 0 to 127.
 func (f VirtualFrame) level(vc VirtualControl) int32 {
-	if vc < 0 || vc >= VC_Count {
+	if f.isMenu() || vc < 0 || vc >= VC_Count {
 		return 0
 	}
 	if bit := virtualButtonBit[vc]; bit >= 0 {
@@ -3602,6 +4040,10 @@ func (cl *CommandList) InputUpdate(char *Char, controller int) bool {
 		} else {
 			frame, setup = sys.participantFrame(channel), sys.participantSetup(channel)
 		}
+		if char == nil && sys.synchronizedMouse() && channel >= 0 && channel < len(sys.menuMouse) {
+			sys.menuMouse[channel].step(frame)
+		}
+		frame = frame.controller()
 		buttons = setup.project(frame)
 		// Button assist keeps its state in the buffer, so rollback restores it.
 		if char != nil && sys.cfg.Input.ButtonAssist {

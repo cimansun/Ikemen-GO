@@ -141,6 +141,7 @@ type SystemStateVars struct {
 	uiRepeatToken       string
 	uiRepeatController  int
 	uiRepeatFrame       int32
+	menuMouse           [MaxPlayerNo]MenuMouse
 
 	endMatch       bool
 	noCharSoundFlg bool
@@ -272,6 +273,9 @@ type System struct {
 	sessionSetups       map[int]SessionSetup // Controller Setup of each netplay or replay channel
 	inputs              InputAssignment
 	textInput           TextInput
+	mouse               MouseInput
+	mousePacket         VirtualFrame
+	mousePacketFrame    int32
 	runSide             int32
 	loader              Loader
 	chars               [MaxPlayerNo][]*Char
@@ -1526,11 +1530,114 @@ func (s *System) deviceFrame(device *InputDevice) VirtualFrame {
 
 // Combined virtual state of every device driving participant n.
 func (s *System) participantFrame(n int) VirtualFrame {
+	s.pollDevices()
 	var f VirtualFrame
 	for _, id := range s.inputs.participantDevices(n) {
 		f = f.merge(s.deviceFrame(s.inputs.device(id)))
 	}
+	if n == 0 && s.inputConnection() != nil && s.mouse.enabled() {
+		if !s.gameRunning || s.motif.me.active {
+			if s.mouse.active && s.frameCounter >= s.mousePacketFrame && s.frameCounter-s.mousePacketFrame <= 1 && s.mousePacket.isMenu() {
+				return s.mousePacket
+			}
+			if s.mouse.active {
+				return s.mouse.packet(s.menuMouse[s.inputConnection().locIn].generation, 0)
+			}
+		} else if s.motifOverlayActive() || s.postMatchFlg {
+			if s.mouse.active {
+				return s.mouse.packet(s.menuMouse[s.inputConnection().locIn].generation, 0)
+			}
+		}
+	}
 	return f
+}
+
+func (s *System) synchronizedMouse() bool {
+	nc := s.inputConnection()
+	return s.replayFile != nil || nc != nil && nc.IsConnected()
+}
+
+func (s *System) mouseForSlot(slot int) *MouseInput {
+	if s.synchronizedMouse() {
+		channel := s.uiControllerKey(slot)
+		if channel >= 0 && channel < len(s.menuMouse) && s.menuMouse[channel].available() {
+			return &s.menuMouse[channel].input
+		}
+		return nil
+	}
+	if s.mouseSlot(slot) {
+		return &s.mouse
+	}
+	return nil
+}
+
+// Hit testing stays local. Only its logical target and mouse buttons cross the network.
+func (s *System) syncMouse(context string, target uint32, slots []int) (uint32, bool, int) {
+	s.pollDevices()
+	if !s.synchronizedMouse() {
+		if !s.mouse.enabled() || !s.mouse.active {
+			return 0, false, 0
+		}
+		return target, s.mouse.moved, -1
+	}
+	chosen := -1
+	priority := -1
+	seen := [MaxPlayerNo]bool{}
+	for _, slot := range slots {
+		channel := s.uiControllerKey(slot)
+		if channel < 0 || channel >= len(s.menuMouse) || seen[channel] {
+			continue
+		}
+		seen[channel] = true
+		m := &s.menuMouse[channel]
+		m.setContext(context)
+		if s.replayFile == nil && s.localSlot(slot) {
+			s.mousePacket = s.mouse.packet(m.generation, target)
+			s.mousePacketFrame = s.frameCounter
+		}
+		if !m.available() {
+			continue
+		}
+		current := 0
+		if m.input.moved {
+			current = 1
+		}
+		for _, held := range m.input.held {
+			if held == 1 {
+				current = 2
+			}
+		}
+		if current > priority {
+			chosen, priority = slot, current
+		}
+	}
+	if chosen < 0 {
+		return 0, false, 0
+	}
+	// A shared menu accepts one pointer per frame, with clicks before hover.
+	for channel, used := range seen {
+		if used && channel != s.uiControllerKey(chosen) {
+			for i := range s.menuMouse[channel].input.taken {
+				s.menuMouse[channel].input.taken[i] = true
+			}
+		}
+	}
+	m := &s.menuMouse[s.uiControllerKey(chosen)]
+	return m.target, m.input.moved, chosen + 1
+}
+
+func (s *System) mouseSlots(player int) []int {
+	if player > 0 {
+		return []int{player - 1}
+	}
+	if s.menuPlayer > 0 {
+		return []int{s.menuPlayer - 1}
+	}
+	slots := make([]int, len(s.commandLists))
+	for i := range slots {
+		slots[i] = i
+	}
+	return slots
 }
 
 // Controller Setup ID of participant n. Shared devices use the primary device's setup.
@@ -1638,13 +1745,16 @@ func (s *System) detachGamepad(joy int) {
 // Updates press/hold state of every device for menus. This is local only,
 // it is not part of rollback state or netplay packets.
 func (s *System) pollDevices() {
-	if s.inputs.frame == s.frameCounter {
+	if s.inRollback() || s.inputs.frame == s.frameCounter {
 		return
 	}
 	s.inputs.frame = s.frameCounter
+	s.mouse.step()
 	for key, down := range s.keyState {
 		if down {
 			s.keyHeld[key]++
+			// A key or button takes the hints back from the mouse.
+			s.mouse.active = s.mouse.active && s.keyHeld[key] > 1
 		} else {
 			delete(s.keyHeld, key)
 		}
@@ -1662,6 +1772,7 @@ func (s *System) pollDevices() {
 			}
 			active = active || device.pressed[vc]
 		}
+		s.mouse.active = s.mouse.active && !active
 		// In menus the first press of an unused device joins it as the next player.
 		if active && !s.inputs.ClaimLocked && !s.netplay() && !s.textInput.active && !s.textInput.release &&
 			s.inputs.owner(device.ID) < 0 && !s.keyboardConflict(device.ID) {
@@ -1671,7 +1782,8 @@ func (s *System) pollDevices() {
 }
 
 // Frames a motif action has been held on one device, read through its
-// saved Button Mapping. KEY: tokens only count for keyboard controllers.
+// saved Button Mapping. KEY: tokens only count for keyboard controllers,
+// MOUSE: tokens for any device.
 func (s *System) deviceActionTime(device *InputDevice, action []string) int32 {
 	s.pollDevices()
 	if device == nil || !device.Connected {
@@ -1681,6 +1793,10 @@ func (s *System) deviceActionTime(device *InputDevice, action []string) int32 {
 		if key, ok := actionKey(token); ok {
 			if device.Joy < 0 && s.keyHeld[key] > 0 {
 				return s.keyHeld[key]
+			}
+		} else if button, ok := actionMouse(token); ok {
+			if t := s.mouse.time(button); t > 0 {
+				return t
 			}
 		} else if vc := parseVirtualControl(token); vc != VC_None && device.held[vc] > 0 {
 			return device.held[vc]
@@ -1989,6 +2105,12 @@ func (s *System) actionTime(action []string, controllerIdx int) int32 {
 			if s.localSlot(controllerIdx) && s.keyHeld[key] > 0 {
 				return s.keyHeld[key]
 			}
+		} else if button, ok := actionMouse(token); ok {
+			if mouse := s.mouseForSlot(controllerIdx); mouse != nil {
+				if t := mouse.time(button); t > 0 {
+					return t
+				}
+			}
 		} else if button, ok := actionButton(token); ok {
 			if t := cl.Buffer.buttonTime(button); t > 0 {
 				return t
@@ -2007,6 +2129,9 @@ func (s *System) menuAction(action []string, controllerIdx int) bool {
 	if s.textInput.active || s.textInput.release {
 		return false
 	}
+	if !s.synchronizedMouse() && s.mouse.pressed(action, controllerIdx) {
+		return true
+	}
 	// time reads how long a token is held; device returns the device that pressed it.
 	// controllerKey keeps a token from firing twice per frame (negative for menuFocus).
 	check := func(controllerKey int, deviceID func() int, time func(token string) int32) bool {
@@ -2022,9 +2147,11 @@ func (s *System) menuAction(action []string, controllerIdx int) bool {
 			if s.uiConsumeInputFrame != 0 && s.frameCounter == s.uiConsumeInputFrame {
 				continue
 			}
-			// A keyboard key is shared by every local slot, so it fires once for all of them.
+			// Keys and mouse buttons are shared by all local slots, so they fire once.
 			guardKey := controllerKey
-			if _, ok := actionKey(token); ok {
+			_, isKey := actionKey(token)
+			_, isMouse := actionMouse(token)
+			if isKey || isMouse && !s.synchronizedMouse() {
 				guardKey = -1
 			}
 			if s.uiConsumeTokenThisFrame(guardKey, token) {
@@ -2032,6 +2159,13 @@ func (s *System) menuAction(action []string, controllerIdx int) bool {
 			}
 			if controllerKey >= 0 {
 				s.lastInputController = controllerKey
+			}
+			// The mouse acts as the device in use, so that device drives the menus.
+			if isMouse {
+				if device := s.glyphDevice(0); device != nil && !s.netplay() {
+					s.inputs.MenuDevice = device.ID
+				}
+				return true
 			}
 			deviceID := deviceID()
 			if !s.netplay() && deviceID != 0 {
@@ -2047,6 +2181,9 @@ func (s *System) menuAction(action []string, controllerIdx int) bool {
 		return false
 	}
 	slot := func(i int) bool {
+		if mouse := s.mouseForSlot(i); mouse != nil && mouse.pressed(action, i) {
+			return true
+		}
 		controllerKey := s.uiControllerKey(i)
 		s.noteSlotInput(controllerKey)
 		return check(controllerKey, func() int { return s.participantMenuDevice(controllerKey) }, func(token string) int32 {
@@ -2072,6 +2209,41 @@ func (s *System) menuAction(action []string, controllerIdx int) bool {
 		}
 	}
 	return false
+}
+
+// The mouse acts as the device that shows the hints, so on screens that read
+// several devices in turn it acts for the one in use.
+func (s *System) mouseDevice(device *InputDevice) bool {
+	owner := s.glyphDevice(0)
+	return owner == nil || device != nil && owner.ID == device.ID
+}
+
+// Same for player slots. An open pause menu reads only its player, so the
+// mouse acts as them.
+func (s *System) mouseSlot(controllerIdx int) bool {
+	if !s.localSlot(controllerIdx) {
+		return false
+	}
+	if s.menuPlayer > 0 {
+		return controllerIdx == s.menuPlayer-1
+	}
+	owner := s.glyphDevice(0)
+	if owner == nil {
+		return true
+	}
+	participant := s.inputs.owner(owner.ID)
+	return participant < 0 || participant == s.uiControllerKey(controllerIdx)
+}
+
+// Glyph pack for hints: the mouse while it is in use, else the device's own pack.
+func (s *System) hintGlyphPack(device *InputDevice) string {
+	if s.mouse.active && s.mouse.enabled() && s.mouseDevice(device) {
+		return "mouse"
+	}
+	if device == nil {
+		return ""
+	}
+	return input.GlyphPack(device, &s.motif.ControllerGlyphs)
 }
 
 // Remembers the device last used in a menu, so hints show its buttons. Only accepted

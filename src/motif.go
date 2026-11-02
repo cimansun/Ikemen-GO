@@ -60,6 +60,10 @@ type InfoProperties struct {
 	Localcoord    [2]int32 `ini:"localcoord" default:"320,240"`
 }
 
+type MouseProperties struct {
+	Enabled bool `ini:"enabled" default:"true"`
+}
+
 type FontProperties struct {
 	Font    string    `ini:"" lua:"font" lookup:"def,font/,,data/"`
 	Height  int32     `ini:"height" default:"-1"`
@@ -1576,6 +1580,7 @@ type Motif struct {
 	Music           Music
 	Def             string                              `ini:"def"`
 	Info            InfoProperties                      `ini:"info"`
+	Mouse           MouseProperties                     `ini:"mouse"`
 	Files           FilesProperties                     `ini:"files"`
 	Languages       map[string]string                   `ini:"languages"`
 	TitleInfo       TitleInfoProperties                 `ini:"title_info"`
@@ -2134,8 +2139,8 @@ func (h *HintProperties) text(context string, deviceID int) string {
 	if context == "" {
 		context = "default"
 	}
-	if device := sys.glyphDevice(deviceID); device != nil {
-		set := "glyph." + input.GlyphPack(device, &sys.motif.ControllerGlyphs)
+	if pack := sys.hintGlyphPack(sys.glyphDevice(deviceID)); pack != "" {
+		set := "glyph." + pack
 		name := set + "." + context
 		if context == "default" {
 			name = set
@@ -3451,6 +3456,28 @@ func (m *Motif) reset() {
 }
 
 func (m *Motif) step() {
+	if sys.synchronizedMouse() && !m.me.active {
+		context := "match"
+		switch {
+		case m.di.active:
+			context = "dialogue"
+		case m.vi.active:
+			context = "victory"
+		case m.co.active:
+			context = "continue"
+		case m.wi.active:
+			context = "results"
+		case m.hi.active:
+			context = "hiscore"
+		case m.ch.active:
+			context = "challenger"
+		case sys.storyboard.active:
+			context = "storyboard"
+		}
+		for i := range sys.menuMouse {
+			sys.menuMouse[i].setContext(context)
+		}
+	}
 	if m.bezelActive() {
 		m.Bezel.AnimData.Update(false)
 	}
@@ -3529,7 +3556,8 @@ func (m *Motif) drawBezel() {
 
 		// The bezel starts at the window's top left, without motif offsets.
 		xoffset := -float32(a.offsetX)
-		a.drawWithOffset(xoffset, 0, a.drawWindowWithOffset(xoffset, 0))
+		window := a.drawWindowWithOffset(xoffset, 0)
+		a.anim.draw(a.drawParamsWithOffset(xoffset, 0, window))
 	})
 }
 

@@ -1638,6 +1638,8 @@ func (s *System) beginSessionOverride(source string, strict, host []SyncSetting,
 		SyncVersion:        syncConfigVersion,
 		ContentFingerprint: contentFingerprint,
 	}
+	s.menuMouse = [MaxPlayerNo]MenuMouse{}
+	s.mousePacket = VirtualFrame{}
 	log.Printf("%s sync config override started: strict=%d host=%d fingerprint=%q",
 		strings.Title(source), len(strict), len(host), contentFingerprint)
 	logSyncVerification(strings.Title(source)+" host override verification", host, appliedHost)

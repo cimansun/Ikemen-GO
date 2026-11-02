@@ -38,6 +38,10 @@ function main.f_btnPalNo(p)
 	local sec = motif.select_info.palette
 	for i, token in ipairs(sec.action) do
 		if getActionTime(p, token) == 1 then
+			-- A mouse button picks the first palette.
+			if token:upper():find('^MOUSE:') then
+				i = 1
+			end
 			return getActionTime(p, sec.shift.action) > 0 and i + 6 or i
 		end
 	end
@@ -261,8 +265,8 @@ function hook.stop(list, name)
 	hook.lists[list][name] = nil
 end
 
---animDraw at specified coordinates
-function main.f_animPosDraw(a, x, y, f)
+-- animDraw at specified coordinates; capture returns the drawn state for mouseOver
+function main.f_animPosDraw(a, x, y, f, capture)
 	if a == nil then
 		return
 	end
@@ -273,8 +277,9 @@ function main.f_animPosDraw(a, x, y, f)
 	if f ~= nil then
 		animSetFacing(a, f)
 	end
-	animDraw(a)
+	local drawn = animDraw(a, nil, capture == true)
 	animUpdate(a)
+	return drawn
 end
 
 --copy table content into new table
@@ -3711,6 +3716,69 @@ local function f_tweenStep(val, target, factor)
 	return newVal
 end
 
+-- The row background under the pointer. The one drawn on top wins.
+function main.f_menuMouseBg(backgrounds)
+	local target = nil
+	for i = #backgrounds, 1, -1 do
+		local bg = backgrounds[i]
+		if (target == nil or bg.layerno > target.layerno) and mouseOver(bg.anim, true) then
+			target = bg
+		end
+	end
+	return target and target.item
+end
+
+-- Pointing at another row moves there and a click on an arrow scrolls. A click on
+-- the selected row is left to its own actions, a click next to the menu does nothing.
+function main.f_menuMouse(t, item, sec)
+	local data, m = sec.mouseData, sec.menu or sec
+	local names = {}
+	for i, row in ipairs(t) do
+		names[i] = row.paramname or row.itemname
+	end
+	local scroll = 0
+	local hover = nil
+	if data ~= nil and data.items == t and mouseActive() then
+		for _, arrow in ipairs({{'up', -1}, {'down', 1}}) do
+			if scroll == 0 and data[arrow[1]] and mouseOver(m.arrow[arrow[1]].AnimData) then
+				scroll = arrow[2]
+			end
+		end
+		local function over(bounds)
+			return bounds ~= nil and mouseOver(m.boxcursor.RectData, bounds[1], bounds[2], bounds[3], bounds[4], m.item.TextSpriteData)
+		end
+		if scroll == 0 then
+			hover = over(data.rows[item]) and item or nil
+			for i = 1, #t do
+				if hover == nil and over(data.rows[i]) then
+					hover = i
+				end
+			end
+			hover = hover or main.f_menuMouseBg(data.backgrounds)
+		end
+	end
+	local target = scroll == -1 and 0xfffffe or scroll == 1 and 0xffffff or hover or 0
+	local moved, player
+	target, moved, player = mouseSync('menu:' .. table.concat(names, '/'), target)
+	if player == 0 or data == nil or data.items ~= t then
+		return nil, 0
+	end
+	scroll = target == 0xfffffe and -1 or target == 0xffffff and 1 or 0
+	hover = target > 0 and target <= #t and target or nil
+	for _, wheel in ipairs({{m.previous.action, -1}, {m.next.action, 1}}) do
+		if mouseTake(wheel[1], player) then
+			return nil, wheel[2]
+		end
+	end
+	if hover ~= nil and hover ~= item and moved then
+		return hover, 0
+	end
+	if hover == item or not mouseTake(data.done, player) then
+		return nil, 0
+	end
+	return hover, scroll
+end
+
 --common menu calculations
 function main.f_menuCommonCalc(t, item, cursorPosY, moveTxt, sec, cursorParams, forcedDir)
 	local m = sec.menu or sec
@@ -3738,8 +3806,21 @@ function main.f_menuCommonCalc(t, item, cursorPosY, moveTxt, sec, cursorParams, 
 	local first = math.max(1, math.min(item - cursorPosY + 1, maxFirst))
 	-- A forced direction overrides input: 1 moves down, -1 moves up, and 0 stops.
 	local moveDir = forcedDir or 0
+	local skip = nil -- direction to skip spacers when input didn't move the cursor
 	if forcedDir == nil then
-		if getAction(-1, m.next.action) then
+		local clicked, scroll = main.f_menuMouse(t, item, sec)
+		if clicked ~= nil then
+			item = clicked
+			sndPlay(motif.Snd, cursorParams.move.snd[1], cursorParams.move.snd[2])
+		elseif scroll ~= 0 then
+			-- Mouse scrolling moves the list. The cursor only moves to stay on screen.
+			first = math.max(1, math.min(first + scroll, maxFirst))
+			if item > first + visible - 1 then
+				item, skip = first + visible - 1, -1
+			elseif item < first then
+				item = first
+			end
+		elseif getAction(-1, m.next.action) then
 			moveDir = 1
 		elseif getAction(-1, m.previous.action) then
 			moveDir = -1
@@ -3762,7 +3843,7 @@ function main.f_menuCommonCalc(t, item, cursorPosY, moveTxt, sec, cursorParams, 
 			main.menuWrapped = wrapped
 			break
 		end
-		candidate = candidate + (moveDir == -1 and -1 or 1)
+		candidate = candidate + (skip or (moveDir == -1 and -1 or 1))
 	end
 	if item ~= item_before and forcedDir == nil and moveDir ~= 0 then
 		sndPlay(motif.Snd, cursorParams.move.snd[1], cursorParams.move.snd[2])
@@ -3836,11 +3917,7 @@ function main.f_hintDraw(hint, context, values, device, side, actions)
 			if actions[name] == nil then
 				return '<action:' .. name .. '>'
 			end
-			local glyphs = {}
-			for _, key in ipairs(actions[name]) do
-				table.insert(glyphs, '<control:' .. key .. '>')
-			end
-			return table.concat(glyphs)
+			return '<control:' .. table.concat(actions[name], ',') .. '>'
 		end)
 	end
 	if side ~= nil then
@@ -3916,6 +3993,11 @@ function main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, sec, bg, skipClear,
 	local offy = opts.offy or 0
 	local forceInactive = opts.forceInactive == true or t[item] == nil
 		or t[item].itemname:match("^spacer%d*$") ~= nil
+	-- Where the rows were drawn, for main.f_menuMouse.
+	sec.mouseData = {
+		items = t, rows = {}, backgrounds = {},
+		done = (opts.hintActions or {})['menu.done'] or m.done.action,
+	}
 
 	-- effective visible-items: treat 0 or 'unlimitedItems' as "all"
 	local visible = (m.window and m.window.visibleitems) or #t
@@ -3966,6 +4048,13 @@ function main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, sec, bg, skipClear,
 		-- shared position
 		local posX = offx + (i - 1) * m.item.spacing[1]
 		local posY = offy + (i - 1) * m.item.spacing[2] - moveTxt
+		if not forceInactive and not itemData.itemname:match('^spacer%d*$') then
+			local c = m.boxcursor.coords
+			sec.mouseData.rows[i] = {
+				m.pos[1] + posX + c[1], m.pos[2] + posY + c[2],
+				m.pos[1] + posX + c[3] + 1, m.pos[2] + posY + c[4] + 1,
+			}
+		end
 		-- background params
 		local bgTable = isActive and m.item.active.bg or m.item.bg
 		local params = bgTable[itemData.paramname] or bgTable.default
@@ -3976,7 +4065,11 @@ function main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, sec, bg, skipClear,
 			bgPosX = bgPosX + (i - 1) * bgTable.default.spacing[1]
 			bgPosY = bgPosY + (i - 1) * bgTable.default.spacing[2] - moveTxt
 		end
-		main.f_animPosDraw(params.AnimData, bgPosX, bgPosY)
+		-- Keep the drawn position even when several rows share one animation.
+		local drawn = main.f_animPosDraw(params.AnimData, bgPosX, bgPosY, nil, sec.mouseData.rows[i] ~= nil)
+		if drawn ~= nil then
+			table.insert(sec.mouseData.backgrounds, {item = i, anim = drawn, layerno = params.layerno})
+		end
 		-- text sprite for label
 		local labelProps
 		if itemData.selected then
@@ -4048,6 +4141,7 @@ function main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, sec, bg, skipClear,
 		rectSetWindow(m.boxcursor.RectData, x1, y1, x1 + w, y1 + h)
 		rectUpdate(m.boxcursor.RectData)
 		rectDraw(m.boxcursor.RectData)
+		sec.mouseData.rows[item] = {x1, y1, x1 + w, y1 + h}
 	end
 	--draw scroll arrows
 	if #t > visible then
@@ -4056,12 +4150,14 @@ function main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, sec, bg, skipClear,
 			animAddPos(m.arrow.up.AnimData, offx, offy)
 			animUpdate(m.arrow.up.AnimData)
 			animDraw(m.arrow.up.AnimData)
+			sec.mouseData.up = not forceInactive
 		end
 		if item >= cursorPosY and item + visible - cursorPosY < #t then
 			animReset(m.arrow.down.AnimData, {'pos'})
 			animAddPos(m.arrow.down.AnimData, offx, offy)
 			animUpdate(m.arrow.down.AnimData)
 			animDraw(m.arrow.down.AnimData)
+			sec.mouseData.down = not forceInactive
 		end
 	end
 	--draw credits text
