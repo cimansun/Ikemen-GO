@@ -526,6 +526,7 @@ func (w *Window) pollEvents() {
 				w.focused = true
 			case sdl.WINDOWEVENT_FOCUS_LOST:
 				w.focused = false
+				sys.netMenuEscapeHeld = false
 				sys.mouse.release()
 			}
 		case sdl.TextInputEvent:

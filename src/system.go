@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"maps"
 	"unsafe"
 
 	//"log"
@@ -142,6 +143,7 @@ type SystemStateVars struct {
 	uiRepeatController  int
 	uiRepeatFrame       int32
 	menuMouse           [MaxPlayerNo]MenuMouse
+	sessionSetups       map[int]SessionSetup // Controller Setup of each netplay or replay channel
 
 	endMatch       bool
 	noCharSoundFlg bool
@@ -270,12 +272,13 @@ type System struct {
 	netConnection       *NetConnection
 	replayFile          *ReplayFile
 	inputCfg            InputConfig
-	sessionSetups       map[int]SessionSetup // Controller Setup of each netplay or replay channel
 	inputs              InputAssignment
 	textInput           TextInput
 	mouse               MouseInput
 	mousePacket         VirtualFrame
 	mousePacketFrame    int32
+	netMenuEscape       bool
+	netMenuEscapeHeld   bool
 	runSide             int32
 	loader              Loader
 	chars               [MaxPlayerNo][]*Char
@@ -1535,6 +1538,10 @@ func (s *System) participantFrame(n int) VirtualFrame {
 	for _, id := range s.inputs.participantDevices(n) {
 		f = f.merge(s.deviceFrame(s.inputs.device(id)))
 	}
+	if n == 0 && s.gameRunning && s.inputConnection() != nil && (s.netMenuEscape || s.netMenuEscapeHeld) {
+		s.netMenuEscape = false
+		return VirtualFrame{Buttons: virtualFrameMenu | 1<<11}
+	}
 	if n == 0 && s.inputConnection() != nil && s.mouse.enabled() {
 		if !s.gameRunning || s.motif.me.active {
 			if s.mouse.active && s.frameCounter >= s.mousePacketFrame && s.frameCounter-s.mousePacketFrame <= 1 && s.mousePacket.isMenu() {
@@ -1555,6 +1562,14 @@ func (s *System) participantFrame(n int) VirtualFrame {
 func (s *System) synchronizedMouse() bool {
 	nc := s.inputConnection()
 	return s.replayFile != nil || nc != nil && nc.IsConnected()
+}
+
+func (s *System) menuEscape(slot int) int32 {
+	channel := s.uiControllerKey(slot)
+	if channel >= 0 && channel < len(s.menuMouse) {
+		return s.menuMouse[channel].escape
+	}
+	return 0
 }
 
 func (s *System) mouseForSlot(slot int) *MouseInput {
@@ -1664,6 +1679,39 @@ func (s *System) channelSetup(channel int) *ControllerSetup {
 		return &setup.controls
 	}
 	return s.participantSetup(0)
+}
+
+func (s *System) saveSessionSetup(player int, definition *ControllerSetupProperties) bool {
+	if !s.netplay() || !s.motif.me.active || s.motif.me.state != ME_Open ||
+		s.inRollback() || player != s.menuPlayer || player < 1 || player > len(s.inputRemap) {
+		return false
+	}
+	channel := s.inputRemap[player-1]
+	setup, ok := s.sessionSetups[channel]
+	if !ok {
+		return false
+	}
+	definition.Name = setup.definition.Name
+	setup.definition, setup.controls = definition, definition.setup()
+	s.sessionSetups = maps.Clone(s.sessionSetups)
+	s.sessionSetups[channel] = setup
+	for slot, cl := range s.commandLists {
+		if cl != nil && s.uiControllerKey(slot) == channel {
+			cl.BufReset()
+		}
+	}
+	for _, chars := range s.chars {
+		for _, c := range chars {
+			if c == nil || c.scf(SCF_disabled) || c.controller < 0 || s.uiControllerKey(c.controller) != channel {
+				continue
+			}
+			for i := range c.cmd {
+				c.cmd[i].BufReset()
+			}
+		}
+	}
+	s.uiResetTokenGuard()
+	return true
 }
 
 // Keep a closing press out of the next screen and gameplay.
@@ -2102,7 +2150,11 @@ func (s *System) actionTime(action []string, controllerIdx int) int32 {
 	}
 	for _, token := range action {
 		if key, ok := actionKey(token); ok {
-			if s.localSlot(controllerIdx) && s.keyHeld[key] > 0 {
+			if key == KeyEscape && s.synchronizedMouse() && s.gameRunning {
+				if held := s.menuEscape(controllerIdx); held > 0 {
+					return held
+				}
+			} else if s.localSlot(controllerIdx) && s.keyHeld[key] > 0 {
 				return s.keyHeld[key]
 			}
 		} else if button, ok := actionMouse(token); ok {
@@ -2151,7 +2203,7 @@ func (s *System) menuAction(action []string, controllerIdx int) bool {
 			guardKey := controllerKey
 			_, isKey := actionKey(token)
 			_, isMouse := actionMouse(token)
-			if isKey || isMouse && !s.synchronizedMouse() {
+			if isKey && !(s.synchronizedMouse() && s.gameRunning) || isMouse && !s.synchronizedMouse() {
 				guardKey = -1
 			}
 			if s.uiConsumeTokenThisFrame(guardKey, token) {
@@ -2237,7 +2289,12 @@ func (s *System) mouseSlot(controllerIdx int) bool {
 
 // Glyph pack for hints: the mouse while it is in use, else the device's own pack.
 func (s *System) hintGlyphPack(device *InputDevice) string {
-	if s.mouse.active && s.mouse.enabled() && s.mouseDevice(device) {
+	if s.synchronizedMouse() && s.menuPlayer > 0 {
+		if mouse := s.mouseForSlot(s.menuPlayer - 1); mouse != nil {
+			return "mouse"
+		}
+	}
+	if s.mouse.active && s.mouse.enabled() && s.mouseDevice(device) && (s.menuPlayer == 0 || s.localSlot(s.menuPlayer-1)) {
 		return "mouse"
 	}
 	if device == nil {
@@ -4776,6 +4833,7 @@ func (s *System) keepMatchRunning() bool {
 // and at the start of any round where a new character tags in for turns mode
 func (s *System) runMatch() (reload bool) {
 	// Reset variables
+	s.netMenuEscape, s.netMenuEscapeHeld = false, false
 	s.matchTime = 0
 	s.fightLoopEnd = false
 	s.aiInput = [len(s.aiInput)]AiInput{}

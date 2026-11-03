@@ -1255,7 +1255,8 @@ func (rf *ReplayFile) Update() bool {
 	if rf.file == nil {
 		sys.esc = true
 	} else {
-		if sys.oldNextAddTime > 0 {
+		// The pause menu also pauses the match, but its frames were recorded.
+		if sys.oldNextAddTime > 0 || sys.motif.me.active {
 			rf.frames = [REPLAY_NUM_INPUTS]VirtualFrame{}
 			if rf.atReplaySyncMarker() {
 				return !sys.gameEnd
@@ -1678,8 +1679,11 @@ func (s *System) currentReplayHeader() *ReplayHeader {
 	}
 }
 
-// Maps the network channels to the setups both peers sent. Channels can change between matches.
+// Start with the exchanged setups and keep pause-menu edits between matches.
 func (s *System) useSessionSetups(nc *NetConnection) {
+	if s.sessionSetups != nil {
+		return
+	}
 	host, guest := nc.locIn, nc.remIn
 	if !nc.host {
 		host, guest = guest, host

@@ -118,6 +118,9 @@ func (sk ShortcutKey) Test(k Key, m ModifierKey) bool {
 }
 
 func OnKeyReleased(key Key, mk ModifierKey) {
+	if key == KeyEscape {
+		sys.netMenuEscapeHeld = false
+	}
 	if key != KeyUnknown {
 		sys.keyState[key] = false
 		// sys.keyInput is used as an edge-triggered "new key press" signal for Lua (getKey()).
@@ -144,8 +147,12 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 		sys.keyState[key] = true
 		sys.keyInput = key
 		escPressed := key == KeyEscape && (mk&ModCtrlAlt) == 0
-		sys.esc = sys.esc || escPressed
-		sys.escPending = sys.escPending || (sys.gameRunning && escPressed)
+		if escPressed && sys.gameRunning && sys.inputConnection() != nil {
+			sys.netMenuEscape, sys.netMenuEscapeHeld = true, true
+		} else {
+			sys.esc = sys.esc || escPressed
+			sys.escPending = sys.escPending || (sys.gameRunning && escPressed)
+		}
 		for k, v := range sys.shortcutScripts {
 			if !sys.motif.me.active && sys.netConnection == nil && (sys.replayFile == nil || !v.DebugKey) &&
 				//(!sys.paused || sys.frameStepFlag || v.Pause) &&
@@ -333,14 +340,16 @@ func (m *MouseInput) over(bounds [4]int32) bool {
 
 // The payload is a menu generation, a 24-bit target and an event sequence.
 type MenuMouse struct {
-	input      MouseInput
-	context    string
-	generation uint16
-	received   uint16
-	target     uint32
-	sequence   byte
-	seen       bool
-	frame      int32
+	input       MouseInput
+	context     string
+	generation  uint16
+	received    uint16
+	target      uint32
+	sequence    byte
+	seen        bool
+	frame       int32
+	escape      int32
+	escapeTaken bool
 }
 
 func (m *MenuMouse) setContext(context string) {
@@ -362,6 +371,12 @@ func (m *MenuMouse) step(f VirtualFrame) {
 	m.input.active = f.isMenu() && f.Buttons&(1<<10) != 0
 	m.input.moved = m.input.active && fresh && f.Buttons&(1<<9) != 0
 	m.input.taken = [len(mouseButtonNames)]bool{}
+	m.escapeTaken = false
+	if f.isMenu() && f.Buttons&(1<<11) != 0 {
+		m.escape++
+	} else {
+		m.escape = 0
+	}
 	for i := range m.input.held {
 		if f.isMenu() && f.Buttons&(1<<uint(i)) != 0 && (i < mouseClickButtons || fresh) {
 			m.input.held[i]++
@@ -1388,9 +1403,10 @@ func (cs *ControllerSetup) project(f VirtualFrame) [16]bool {
 }
 
 // The Controller Setup of a netplay or replay channel, as rows and as bindings.
+// It is never changed in place, so rollback snapshots can share it.
 type SessionSetup struct {
-	definition *ControllerSetupProperties
-	controls   ControllerSetup
+	initial, definition *ControllerSetupProperties
+	controls            ControllerSetup
 }
 
 func newSessionSetup(p *ControllerSetupProperties) SessionSetup {
@@ -1399,7 +1415,7 @@ func newSessionSetup(p *ControllerSetupProperties) SessionSetup {
 		definition = *p
 		definition.Buttons = maps.Clone(p.Buttons)
 	}
-	return SessionSetup{definition: &definition, controls: definition.setup()}
+	return SessionSetup{initial: &definition, definition: &definition, controls: definition.setup()}
 }
 
 // Runtime copy of the input sections of config.ini.
@@ -1846,11 +1862,12 @@ func (ir *InputReader) ButtonAssistCheck(current [9]bool) [9]bool {
 
 // This used to hold button state variables (e.g. U), but that didn't have any info we can't derive from the *b (e.g. Ub) vars
 type InputBuffer struct {
-	InputReader                            *InputReader
-	Bb, Db, Fb, Ub, Lb, Rb, Nb             int32 // Current state of buffer
+	InputReader                                    *InputReader
+	Bb, Db, Fb, Ub, Lb, Rb, Nb                     int32 // Current state of buffer
 	ab, bb, cb, xb, yb, zb, sb, db, wb, mb, lb, rb int32
-	Bp, Dp, Fp, Up, Lp, Rp, Np             int32 // Previous state of buffer
-	vb                                     [VC_Count]int32 // frames each virtual control is held, for motif actions
+	Bp, Dp, Fp, Up, Lp, Rp, Np                     int32           // Previous state of buffer
+	vb                                             [VC_Count]int32 // frames each virtual control is held, for motif actions
+	vf                                             VirtualFrame
 	ap, bp, cp, xp, yp, zp, sp, dp, wp, mp, lp, rp int32
 }
 
@@ -1876,6 +1893,7 @@ func (ib *InputBuffer) Reset() {
 
 // Counts how long each virtual control is held. Motif actions read these.
 func (ib *InputBuffer) updateVirtualTime(f VirtualFrame) {
+	ib.vf = f
 	for vc := range ib.vb {
 		if f.held(VirtualControl(vc)) {
 			ib.vb[vc]++

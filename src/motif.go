@@ -3806,11 +3806,13 @@ type MotifMenu struct {
 	state       MenuState
 	reopenLock  bool
 	player      int // 1-based player who opened the menu
+	netDelay    int
 }
 
 func (me *MotifMenu) reset(m *Motif) {
 	me.active = false
 	me.player = 0
+	me.netDelay = 0
 	sys.menuPlayer = 0
 	me.initialized = false
 	me.state = ME_OpeningOut
@@ -3822,13 +3824,13 @@ func (me *MotifMenu) reset(m *Motif) {
 // returns true if the pause/menu open input is still physically held.
 func (me *MotifMenu) menuOpenInputHeld(m *Motif) bool {
 	// Physical ESC hold
-	if sys.keyState != nil && sys.keyState[KeyEscape] {
+	if !sys.synchronizedMouse() && sys.keyState != nil && sys.keyState[KeyEscape] {
 		return true
 	}
 	// Also respect the configured open action
 	if pm := me.pauseMenu(m); pm != nil && pm.Enabled {
 		for i := range sys.commandLists {
-			if sys.actionTime(pm.Open.Action, i) > 0 {
+			if sys.synchronizedMouse() && sys.menuEscape(i) > 0 || sys.actionTime(pm.Open.Action, i) > 0 {
 				return true
 			}
 		}
@@ -3847,8 +3849,7 @@ func (me *MotifMenu) openingPlayer(pm *MenuInfoProperties) int {
 	}
 	hold := Max(1, pm.Open.HoldTime)
 	for i := range sys.commandLists {
-		// Remote netplay players can't open the local menu.
-		if sys.localSlot(i) && sys.actionTime(pm.Open.Action, i) == hold {
+		if sys.synchronizedMouse() && sys.menuEscape(i) == 1 || sys.actionTime(pm.Open.Action, i) == hold {
 			return i + 1
 		}
 	}
@@ -3886,6 +3887,9 @@ func (me *MotifMenu) requestClose(m *Motif) {
 }
 
 func (me *MotifMenu) init(m *Motif) {
+	if sys.rollback.session != nil && sys.rollback.session.syncTest {
+		return
+	}
 	pm := me.pauseMenu(m)
 	if pm == nil || !pm.Enabled || !me.enabled {
 		me.initialized = true
@@ -3931,9 +3935,17 @@ func (me *MotifMenu) init(m *Motif) {
 	me.active = true
 	me.initialized = true
 	me.state = ME_OpeningOut
+	if sys.netplay() {
+		// Predicted pause entry can be replayed. Lua starts beyond that prediction window.
+		me.netDelay = netMenuDelay
+	}
 }
 
 func (me *MotifMenu) step(m *Motif) {
+	if me.netDelay > 0 {
+		me.netDelay--
+		return
+	}
 	// Round state does not advance motif fades while the match is paused.
 	if m.fadeOut.isActive() {
 		m.fadeOut.step()
@@ -3993,6 +4005,9 @@ func (me *MotifMenu) step(m *Motif) {
 
 // runLua executes the pause-menu Lua loop.
 func (me *MotifMenu) runLua(m *Motif) {
+	if sys.rollback.session != nil && !sys.rollback.menuUpdating {
+		return
+	}
 	// Draw the menu during its fade-in and fade-out, but not while the match is on screen.
 	if me.state == ME_OpeningOut || me.state == ME_ClosingIn {
 		return
