@@ -251,11 +251,12 @@ func startFadeOutFrom(tmpl, dest, fi *Fade, overrideBlack bool, policy FadeStart
 type Rect struct {
 	window     [4]int32
 	col        uint32
+	trans      TransType
 	alpha      [2]int32
 	time       int32
 	layerno    int16
 	localScale float32
-	offsetX    int32
+	offsetX    float32
 	// pulse src = clamp(mid + amp * sin(phase))
 	pulseMid       float32
 	pulseAmp       float32
@@ -268,7 +269,7 @@ type Rect struct {
 }
 
 func NewRect() *Rect {
-	return &Rect{window: sys.scrrect, alpha: [2]int32{255, 0}, localScale: 1}
+	return &Rect{window: sys.scrrect, trans: TT_default, alpha: [2]int32{255, 0}, localScale: 1}
 }
 
 func packAlpha(src, dst int32) [2]int32 {
@@ -287,7 +288,12 @@ func (r *Rect) updateAlpha() {
 
 func (r *Rect) Draw(ln int16) {
 	if r != nil && r.layerno == ln {
-		FillRect(r.drawWindow(), r.col, r.alpha, nil)
+		alpha := r.alpha
+		// None is opaque, as in transBlend. Pulse would otherwise override it.
+		if r.trans == TT_none {
+			alpha = [2]int32{255, 0}
+		}
+		FillRectTrans(r.drawWindow(), r.col, r.trans, alpha, nil)
 	}
 }
 
@@ -302,6 +308,12 @@ func (r *Rect) SetColor(col [3]int32) {
 func (r *Rect) SetAlpha(alpha [2]int32) {
 	r.alpha = packAlpha(alpha[0], alpha[1])
 	r.autoAlpha = false
+}
+
+// SetTrans sets the blending type. Alpha keeps supplying the factors, because
+// rectangles have no factors of their own.
+func (r *Rect) SetTrans(tt TransType) {
+	r.trans = tt
 }
 
 func (r *Rect) SetAlphaPulse(sMid, sAmp, sPeriod int32) {
@@ -327,7 +339,7 @@ func (r *Rect) SetLocalcoord(lx, ly float32) {
 		v = ly * 4 / 3
 	}
 	r.localScale = float32(v / 320)
-	r.offsetX = -int32(math.Floor(float64(lx)/(float64(v)/320)-320) / 2)
+	r.offsetX = localcoordOffsetX(float64(lx), float64(v))
 }
 
 func (r *Rect) SetWindow(window [4]float32) {
@@ -344,16 +356,11 @@ func (r *Rect) drawWindow() [4]int32 {
 	}
 	// Pixel bounds depend on the aspect state selected for this draw pass.
 	window := r.windowInit
-	x := window[0]/r.localScale + float32(r.offsetX)
+	x := window[0]/r.localScale + r.offsetX
 	y := window[1] / r.localScale
 	w := (window[2] - window[0]) / r.localScale
 	h := (window[3] - window[1]) / r.localScale
-	return [4]int32{
-		int32(math.Round(float64((x + float32(sys.gameWidth-320)/2) * sys.widthScale))),
-		int32(math.Round(float64((y + float32(sys.gameHeight-240)) * sys.heightScale))),
-		int32(w*sys.widthScale + 0.5),
-		int32(h*sys.heightScale + 0.5),
-	}
+	return screenRect(x+(sys.gameWidth-320)/2, y+sys.gameHeight-240, w, h)
 }
 
 func (r *Rect) Update() {
