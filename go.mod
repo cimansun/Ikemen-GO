@@ -16,15 +16,15 @@ require (
 	github.com/mdouchement/hdr v0.2.4
 	github.com/qmuntal/gltf v0.24.2
 	github.com/sqweek/dialog v0.0.0-20220809060634-e981b270ebbf
-	github.com/tidwall/gjson v1.20.0
-	github.com/tidwall/sjson v1.2.5
+	github.com/tidwall/gjson v1.20.2
+	github.com/tidwall/sjson v1.2.9
 	github.com/veandco/go-sdl2 v0.5.0-alpha.7.0.20250220045537-7f43f67a3a12
 	github.com/yuin/gopher-lua v1.1.0
 	golang.org/x/exp v0.0.0-20220609121020-a51bd0440498
-	golang.org/x/image v0.47.0
+	golang.org/x/image v0.48.0
 	golang.org/x/mobile v0.0.0-20221110043201-43a038452099
-	golang.org/x/sys v0.49.0
-	golang.org/x/text v0.43.0
+	golang.org/x/sys v0.50.0
+	golang.org/x/text v0.44.0
 	gopkg.in/ini.v1 v1.67.0
 )
 
@@ -40,5 +40,5 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/samhocevar/go-meltysynth v0.0.0-20230403180939-aca4a036cb16 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
-	github.com/tidwall/pretty v1.2.0 // indirect
+	github.com/tidwall/pretty v1.3.0 // indirect
 )
