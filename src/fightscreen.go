@@ -2005,8 +2005,10 @@ func (fa *FightScreenFace) draw(layerno int16, charpn int, refFace *FightScreenF
 		}
 
 		// Draw the actual face sprite
+		gi := &sys.cgi[charpn]
+		portraitScale := gi.portraitscale * gi.rawlocalscl * sys.fightScreen.portraitScale
 		fa.face_lay.DrawFaceSprite((float32(fa.pos[0])+sys.fightScreen.offsetX)*sys.fightScreen.scale, float32(fa.pos[1])*sys.fightScreen.scale, layerno,
-			refFace.face, fa.face_pfx, sys.cgi[charpn].portraitscale*sys.fightScreen.portraitScale, &fa.face_lay.window)
+			refFace.face, fa.face_pfx, portraitScale, &fa.face_lay.window)
 
 		// Draw KO layer
 		if !refChar.alive() {
@@ -3755,6 +3757,10 @@ func (ro *FightScreenRound) handleRoundIntro() {
 	// Skip fight call
 	// Cannot be skipped unless round call is finished or also skipped
 	if ro.roundDisplayPhase == 2 && sys.gsf(GSF_skipfightdisplay) {
+		if ro.fightDisplayPhase == 0 {
+			sys.timerCount = append(sys.timerCount, sys.matchTime)
+			ro.timerActive = true
+		}
 		ro.fightDisplayPhase = 2
 		if sys.intro > 1 {
 			sys.intro = 1 // Skip ctrl waiting time

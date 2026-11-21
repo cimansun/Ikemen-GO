@@ -468,10 +468,25 @@ func (t *Texture_GLES32) SetDataG(data []byte, mag, min, ws, wt TextureSamplingP
 	gl.PixelStorei(gl.UNPACK_ROW_LENGTH, 0)
 	gl.TexImage2D(gl.TEXTURE_2D, 0, int32(internalFormat), t.width, t.height, 0, uploadFormat, uploadType, unsafe.Pointer(&data[0]))
 	gl.GenerateMipmap(gl.TEXTURE_2D)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, int32(mag))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, int32(min))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, int32(ws))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, int32(wt))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, t.MapTextureSamplingParam(mag))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, t.MapTextureSamplingParam(min))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, t.MapTextureSamplingParam(ws))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, t.MapTextureSamplingParam(wt))
+}
+
+func (t *Texture_GLES32) MapTextureSamplingParam(i TextureSamplingParam) int32 {
+	var SamplingParam = map[TextureSamplingParam]int32{
+		TextureSamplingFilterNearest:              gl.NEAREST,
+		TextureSamplingFilterLinear:               gl.LINEAR,
+		TextureSamplingFilterNearestMipMapNearest: gl.NEAREST_MIPMAP_NEAREST,
+		TextureSamplingFilterLinearMipMapNearest:  gl.LINEAR_MIPMAP_NEAREST,
+		TextureSamplingFilterNearestMipMapLinear:  gl.NEAREST_MIPMAP_LINEAR,
+		TextureSamplingFilterLinearMipMapLinear:   gl.LINEAR_MIPMAP_LINEAR,
+		TextureSamplingWrapClampToEdge:            gl.CLAMP_TO_EDGE,
+		TextureSamplingWrapMirroredRepeat:         gl.MIRRORED_REPEAT,
+		TextureSamplingWrapRepeat:                 gl.REPEAT,
+	}
+	return SamplingParam[i]
 }
 
 func (t *Texture_GLES32) SetPixelData(data []float32) {
@@ -832,7 +847,7 @@ func (r *Renderer_GLES32) Init() {
 	r.spriteShader, _ = r.newShaderProgram(vertShader, fragShader, "", "Main Shader", true)
 	r.spriteShader.RegisterAttributes("position", "uv")
 	r.spriteShader.RegisterUniforms("modelview", "projection", "x1x2x4x3",
-		"alpha", "tint", "mask", "neg", "gray", "add", "mult", "isFlat", "isRgba", "isTrapez", "hue",
+		"alpha", "tint", "mask", "neg", "gray", "add", "mult", "isFlat", "isRgba", "isTrapez", "hue", "supersample",
 		"spriteUV", "palUV", "quad", "useQuad")
 	r.spriteShader.RegisterTextures("pal", "tex")
 
@@ -2418,7 +2433,7 @@ func (r *Renderer_GLES32) LoadCustomSpriteShader(shaderName string, shaderData [
 
 	shader.RegisterAttributes("position", "uv")
 	shader.RegisterUniforms("modelview", "projection", "x1x2x4x3",
-		"alpha", "tint", "mask", "neg", "gray", "add", "mult", "isFlat", "isRgba", "isTrapez", "hue",
+		"alpha", "tint", "mask", "neg", "gray", "add", "mult", "isFlat", "isRgba", "isTrapez", "hue", "supersample",
 		"spriteUV", "palUV", "tex1UV", "tex2UV", "quad", "useQuad",
 		"iTime", "iResolution", "aspectRatio", "sTime", "param")
 	shader.RegisterTextures("pal", "tex", "tex1", "tex2", "bgl_RenderedTexture")
